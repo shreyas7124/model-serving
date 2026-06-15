@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NIM Voice Chat</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="auth-container" class="container">
+        <h1>🎤 NIM Voice Chat</h1>
+        <div id="auth-tabs">
+            <button class="tab-btn active" onclick="showTab('login')">Login</button>
+            <button class="tab-btn" onclick="showTab('register')">Register</button>
+            <button class="tab-btn" onclick="showTab('guest')">Guest</button>
+        </div>
+        
+        <div id="login-tab" class="tab-content active">
+            <h2>Login</h2>
+            <input type="text" id="login-username" placeholder="Username">
+            <input type="password" id="login-password" placeholder="Password">
+            <button onclick="login()">Login</button>
+        </div>
+        
+        <div id="register-tab" class="tab-content">
+            <h2>Register</h2>
+            <input type="text" id="register-username" placeholder="Username">
+            <input type="password" id="register-password" placeholder="Password">
+            <input type="password" id="register-confirm" placeholder="Confirm Password">
+            <button onclick="register()">Register</button>
+        </div>
+        
+        <div id="guest-tab" class="tab-content">
+            <h2>Continue as Guest</h2>
+            <p>Use the chat without logging in. Your history won't be saved.</p>
+            <button onclick="guestLogin()">Continue as Guest</button>
+        </div>
+        
+        <div id="auth-message"></div>
+    </div>
+    
+    <div id="chat-container" class="container" style="display: none;">
+        <div class="header">
+            <h1>🎤 NIM Voice Chat</h1>
+            <div class="user-info">
+                <span id="username-display"></span>
+                <button onclick="logout()">Logout</button>
+            </div>
+        </div>
+        
+        <div class="chat-area">
+            <div id="messages"></div>
+        </div>
+        
+        <div class="controls">
+            <button id="record-btn" onclick="toggleRecording()">
+                <span id="record-icon">🎤</span>
+                <span id="record-text">Start Recording</span>
+            </button>
+            <div id="status"></div>
+        </div>
+        
+        <div class="text-input">
+            <input type="text" id="text-input" placeholder="Or type your message...">
+            <button onclick="sendTextMessage()">Send</button>
+        </div>
+    </div>
+    
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

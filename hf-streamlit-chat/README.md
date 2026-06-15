@@ -1,0 +1,132 @@
+# HuggingFace Streamlit Chat Interface
+
+A chat interface powered by HuggingFace Transformers with optional authentication and conversation history.
+
+## Features
+
+- 🤗 Local HuggingFace model inference
+- 🔐 Optional user authentication
+- 📝 Conversation history (for logged-in users)
+- 🔄 Multiple conversation management
+- 👤 Guest mode support
+- 🚀 GPU acceleration support
+
+## Prerequisites
+
+- Python 3.8+
+- NVIDIA GPU (optional, but recommended for better performance)
+- CUDA toolkit (if using GPU)
+
+## Setup
+
+### 1. Install Python Dependencies
+
+```bash
+cd hf-streamlit-chat
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env with your preferred HuggingFace model
+```
+
+### 3. Run the Application
+
+```bash
+streamlit run app.py
+```
+
+The application will open in your browser at `http://localhost:8501`
+
+**Note**: The first run will download the model, which may take some time depending on the model size.
+
+## Usage
+
+### Login Options
+
+1. **Login**: Use existing credentials
+2. **Register**: Create a new account
+3. **Guest Mode**: Use without authentication (no history saved)
+
+### Chat Features
+
+- Type your message in the chat input
+- View conversation history in the sidebar (logged-in users)
+- Start new conversations with the "New Conversation" button
+- Load previous conversations from the sidebar
+
+## Configuration
+
+Edit `.env` file:
+
+- `HF_MODEL_NAME`: HuggingFace model to use (default: microsoft/DialoGPT-medium)
+
+### Recommended Models
+
+**Small Models (CPU-friendly):**
+- `microsoft/DialoGPT-small` - 117M parameters
+- `microsoft/DialoGPT-medium` - 345M parameters (default)
+- `facebook/blenderbot-400M-distill` - 400M parameters
+
+**Larger Models (GPU recommended):**
+- `microsoft/DialoGPT-large` - 762M parameters
+- `meta-llama/Llama-2-7b-chat-hf` - 7B parameters (requires HF token)
+- `mistralai/Mistral-7B-Instruct-v0.1` - 7B parameters
+
+**Note**: Some models require accepting terms on HuggingFace and using an access token.
+
+## Using Gated Models
+
+For gated models (like Llama 2), you need to:
+
+1. Accept the model terms on HuggingFace
+2. Create an access token at https://huggingface.co/settings/tokens
+3. Login via CLI:
+```bash
+huggingface-cli login
+```
+
+## Performance Tips
+
+### GPU Acceleration
+
+The app automatically uses GPU if available. Check the sidebar to see which device is being used.
+
+### Memory Management
+
+For large models, you may need to:
+- Use a smaller model
+- Reduce `max_length` in the generation parameters
+- Use model quantization (add to requirements: `bitsandbytes`)
+
+## Troubleshooting
+
+### Out of Memory Errors
+
+If you encounter OOM errors:
+1. Use a smaller model
+2. Restart the application
+3. Clear the Streamlit cache: `streamlit cache clear`
+
+### Slow Response Times
+
+- Ensure you're using GPU if available
+- Try a smaller model
+- Reduce the conversation history length
+
+### Model Download Issues
+
+If model download fails:
+```bash
+# Pre-download the model
+python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('microsoft/DialoGPT-medium')"
+```
+
+## Model Storage
+
+Downloaded models are cached in:
+- Linux/Mac: `~/.cache/huggingface/`
+- Windows: `C:\Users\<username>\.cache\huggingface\`
