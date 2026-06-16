@@ -1,0 +1,119 @@
+# Workload Definition File (WDF) — generated for hf-webrtc-voice
+# apiVersion wdf.7sg.ai/v2 (scenario-based). Validated against
+# services/artifacts/schema/wdf.schema.202605011755.json.
+#
+# NOTES / placeholders to review before use:
+#  - This app has no Dockerfile; the platform build step must produce the image
+#    (runtime.image.repository below is a suggested name; registry is left to the build/push).
+#  - autoscaling is pinned to 1 replica: all apps share a local SQLite store
+#    (shared/database/*.db), which is not safe to run multi-replica as-is.
+#  - secret externalRef.key values are placeholder Vault paths — set real ones.
+#  - Loads the model in-process: schedule on a CUDA GPU node.
+apiVersion: wdf.7sg.ai/v2
+kind: WorkloadDefinition
+metadata:
+  name: hf-webrtc-voice
+  version: 1.0.0
+  description: HuggingFace-backed WebRTC voice app (Flask + Socket.IO) serving a browser UI.
+  tags:
+    env: dev
+source:
+  repo: https://github.com/7sg-ai/model-serving
+  branch: main
+  path: hf-webrtc-voice
+security:
+  policies:
+    secretsInEnvAllowed: true
+secrets:
+  provider: external-secrets
+  secretRefs:
+  - name: flask-secret-key
+    injectAs: env
+    envVar: SECRET_KEY
+    externalRef:
+      provider: vault
+      key: secret/model-serving/hf-webrtc-voice/flask-secret-key
+scenarios:
+  native:
+    description: Local single-node container host (matches the repo's local-first setup).
+    topology:
+      components:
+      - name: voice-app
+        role: ui
+        runtime:
+          platform: container-platform
+          regions:
+          - local
+          image:
+            repository: model-serving/hf-webrtc-voice
+            tag: latest
+          resources:
+            cpu: '4'
+            memory: 16Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: HF_MODEL_NAME
+            value: microsoft/DialoGPT-medium
+          envFromSecretRefs:
+          - flask-secret-key
+        endpoints:
+        - name: http
+          port: 5001
+          exposure: public
+          protocol: http
+          path: /
+    deployments:
+    - name: local
+      target:
+        provider: onprem
+        region: local
+        namespace: model-serving
+      components:
+      - voice-app
+  alternates:
+  - name: azure-kubernetes
+    description: Scale-out on an AKS GPU node pool.
+    topology:
+      components:
+      - name: voice-app
+        role: ui
+        runtime:
+          platform: kubernetes
+          regions:
+          - eastus2
+          image:
+            repository: model-serving/hf-webrtc-voice
+            tag: latest
+          resources:
+            cpu: '4'
+            memory: 16Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: HF_MODEL_NAME
+            value: microsoft/DialoGPT-medium
+          envFromSecretRefs:
+          - flask-secret-key
+        endpoints:
+        - name: http
+          port: 5001
+          exposure: public
+          protocol: http
+          path: /
+    deployments:
+    - name: azure-east
+      target:
+        provider: azure
+        region: eastus2
+        namespace: hf-webrtc-voice
+      components:
+      - voice-app

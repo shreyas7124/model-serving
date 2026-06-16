@@ -1,0 +1,135 @@
+# Workload Definition File (WDF) — generated for nim-ide-assistant
+# apiVersion wdf.7sg.ai/v2 (scenario-based). Validated against
+# services/artifacts/schema/wdf.schema.202605011755.json.
+#
+# NOTES / placeholders to review before use:
+#  - This app has no Dockerfile; the platform build step must produce the image
+#    (runtime.image.repository below is a suggested name; registry is left to the build/push).
+#  - autoscaling is pinned to 1 replica: all apps share a local SQLite store
+#    (shared/database/*.db), which is not safe to run multi-replica as-is.
+#  - secret externalRef.key values are placeholder Vault paths — set real ones.
+#  - Requires a reachable NIM model server (its own NGC_API_KEY); not part of this WDF.
+apiVersion: wdf.7sg.ai/v2
+kind: WorkloadDefinition
+metadata:
+  name: nim-ide-assistant
+  version: 1.0.0
+  description: NIM-backed OpenAI-compatible API for IDE coding assistants (Cline/Cursor).
+  tags:
+    env: dev
+source:
+  repo: https://github.com/7sg-ai/model-serving
+  branch: main
+  path: nim-ide-assistant
+security:
+  policies:
+    secretsInEnvAllowed: true
+secrets:
+  provider: external-secrets
+  secretRefs:
+  - name: ide-api-key
+    injectAs: env
+    envVar: API_KEY
+    externalRef:
+      provider: vault
+      key: secret/model-serving/nim-ide-assistant/api-key
+scenarios:
+  native:
+    description: Local single-node container host (matches the repo's local-first setup).
+    topology:
+      components:
+      - name: ide-api
+        role: api
+        runtime:
+          platform: container-platform
+          regions:
+          - local
+          image:
+            repository: model-serving/nim-ide-assistant
+            tag: latest
+          resources:
+            cpu: '1'
+            memory: 1Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: NIM_API_URL
+            value: http://nim-llama:8000/v1/chat/completions
+          - name: NIM_MODEL_NAME
+            value: meta/llama-3.1-8b-instruct
+          - name: MAX_TOKENS
+            value: '4096'
+          - name: TEMPERATURE
+            value: '0.7'
+          - name: CONTEXT_WINDOW
+            value: '8192'
+          envFromSecretRefs:
+          - ide-api-key
+        endpoints:
+        - name: http
+          port: 8080
+          exposure: public
+          protocol: http
+          path: /v1
+    deployments:
+    - name: local
+      target:
+        provider: onprem
+        region: local
+        namespace: model-serving
+      components:
+      - ide-api
+  alternates:
+  - name: azure-kubernetes
+    description: Scale-out on an AKS GPU node pool.
+    topology:
+      components:
+      - name: ide-api
+        role: api
+        runtime:
+          platform: kubernetes
+          regions:
+          - eastus2
+          image:
+            repository: model-serving/nim-ide-assistant
+            tag: latest
+          resources:
+            cpu: '1'
+            memory: 1Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: NIM_API_URL
+            value: http://nim-llama:8000/v1/chat/completions
+          - name: NIM_MODEL_NAME
+            value: meta/llama-3.1-8b-instruct
+          - name: MAX_TOKENS
+            value: '4096'
+          - name: TEMPERATURE
+            value: '0.7'
+          - name: CONTEXT_WINDOW
+            value: '8192'
+          envFromSecretRefs:
+          - ide-api-key
+        endpoints:
+        - name: http
+          port: 8080
+          exposure: public
+          protocol: http
+          path: /v1
+    deployments:
+    - name: azure-east
+      target:
+        provider: azure
+        region: eastus2
+        namespace: nim-ide-assistant
+      components:
+      - ide-api

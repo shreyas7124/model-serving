@@ -1,0 +1,109 @@
+# Workload Definition File (WDF) — generated for hf-streamlit-chat
+# apiVersion wdf.7sg.ai/v2 (scenario-based). Validated against
+# services/artifacts/schema/wdf.schema.202605011755.json.
+#
+# NOTES / placeholders to review before use:
+#  - This app has no Dockerfile; the platform build step must produce the image
+#    (runtime.image.repository below is a suggested name; registry is left to the build/push).
+#  - autoscaling is pinned to 1 replica: all apps share a local SQLite store
+#    (shared/database/*.db), which is not safe to run multi-replica as-is.
+#  - secret externalRef.key values are placeholder Vault paths — set real ones.
+#  - Loads the model in-process: schedule on a CUDA GPU node; memory sized for a small model.
+apiVersion: wdf.7sg.ai/v2
+kind: WorkloadDefinition
+metadata:
+  name: hf-streamlit-chat
+  version: 1.0.0
+  description: HuggingFace-backed Streamlit chat UI. Loads the model in-process via transformers.
+  tags:
+    env: dev
+source:
+  repo: https://github.com/7sg-ai/model-serving
+  branch: main
+  path: hf-streamlit-chat
+security:
+  policies:
+    secretsInEnvAllowed: true
+secrets:
+  provider: external-secrets
+  secretRefs: []
+scenarios:
+  native:
+    description: Local single-node container host (matches the repo's local-first setup).
+    topology:
+      components:
+      - name: chat-ui
+        role: ui
+        runtime:
+          platform: container-platform
+          regions:
+          - local
+          image:
+            repository: model-serving/hf-streamlit-chat
+            tag: latest
+          resources:
+            cpu: '4'
+            memory: 16Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: HF_MODEL_NAME
+            value: microsoft/DialoGPT-medium
+        endpoints:
+        - name: http
+          port: 8501
+          exposure: public
+          protocol: http
+          path: /
+    deployments:
+    - name: local
+      target:
+        provider: onprem
+        region: local
+        namespace: model-serving
+      components:
+      - chat-ui
+  alternates:
+  - name: azure-kubernetes
+    description: Scale-out on an AKS GPU node pool.
+    topology:
+      components:
+      - name: chat-ui
+        role: ui
+        runtime:
+          platform: kubernetes
+          regions:
+          - eastus2
+          image:
+            repository: model-serving/hf-streamlit-chat
+            tag: latest
+          resources:
+            cpu: '4'
+            memory: 16Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: HF_MODEL_NAME
+            value: microsoft/DialoGPT-medium
+        endpoints:
+        - name: http
+          port: 8501
+          exposure: public
+          protocol: http
+          path: /
+    deployments:
+    - name: azure-east
+      target:
+        provider: azure
+        region: eastus2
+        namespace: hf-streamlit-chat
+      components:
+      - chat-ui
