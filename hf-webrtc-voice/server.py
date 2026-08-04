@@ -16,12 +16,26 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.auth import AuthManager
 from shared.database import ChatHistory
+from shared.multinode import (
+    ClusterInfo,
+    apply_flask_multinode,
+    get_multinode_config,
+    run_socketio_app,
+)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-change-this')
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 CORS(app, supports_credentials=True)
-socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Multi-node / cluster configuration
+MN_CFG = get_multinode_config(default_port=5001, app_name="hf-webrtc-voice")
+apply_flask_multinode(app, MN_CFG)
+CLUSTER = ClusterInfo(MN_CFG, app_name="hf-webrtc-voice")
+
+_socketio_kwargs = {"cors_allowed_origins": "*"}
+if MN_CFG.use_redis and MN_CFG.redis_url:
+    _socketio_kwargs["message_queue"] = MN_CFG.redis_url
+socketio = SocketIO(app, **_socketio_kwargs)
 
 # Configuration
 MODEL_NAME = os.getenv("HF_MODEL_NAME", "microsoft/DialoGPT-medium")
@@ -30,6 +44,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Initialize managers
 auth_manager = AuthManager()
 chat_history = ChatHistory()
+
 
 # Load model
 print(f"Loading model {MODEL_NAME} on {DEVICE}...")
@@ -119,8 +134,15 @@ def get_conversation(conv_id):
     messages = chat_history.get_conversation_history(conv_id)
     return jsonify({'messages': messages}), 200
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check with multi-node identity"""
+    return jsonify(CLUSTER.health(model=MODEL_NAME, device=DEVICE)), 200
+
+
 def generate_response(prompt, chat_history_ids):
     """Generate response using HuggingFace model"""
+
     try:
         new_input_ids = tokenizer.encode(
             prompt + tokenizer.eos_token, 
@@ -227,4 +249,5 @@ def handle_text_message(data):
     handle_voice_message(data)
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5001, debug=True)
+    run_socketio_app(socketio, app, MN_CFG, default_port=5001, debug=not MN_CFG.enabled)
+

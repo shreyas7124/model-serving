@@ -8,8 +8,12 @@ An OpenAI-compatible API server that connects HuggingFace models to IDEs like Cl
 - 🤗 Powered by HuggingFace Transformers
 - 💻 Works with Cline, Cursor, and other OpenAI-compatible tools
 - 🔑 API key authentication
-- 📝 Local model inference
+- 📝 Local model inference optimized for complicated multi-file coding
 - 🚀 GPU acceleration support
+- 🧠 1M-token context budget with automatic trim to model capacity
+- ⚡ In-memory response cache + conversation memory (KV cache on generate)
+- 🥮 **Mooncake** L2 cache auto-enabled for Moonshot / Kimi models
+
 
 ## Prerequisites
 
@@ -54,7 +58,8 @@ The server will start on port 8081 and display configuration details.
    - **API Provider**: OpenAI Compatible
    - **Base URL**: `http://localhost:8081/v1`
    - **API Key**: `hf-coding-assistant-key` (or your custom key from .env)
-   - **Model**: `microsoft/DialoGPT-medium` (or your configured model)
+   - **Model**: `moonshotai/Kimi-K3` (or your configured model)
+
 
 ### For Cursor
 
@@ -64,7 +69,8 @@ The server will start on port 8081 and display configuration details.
    - **Provider**: OpenAI Compatible
    - **Base URL**: `http://localhost:8081/v1`
    - **API Key**: `hf-coding-assistant-key`
-   - **Model ID**: `microsoft/DialoGPT-medium`
+   - **Model ID**: `moonshotai/Kimi-K3`
+
 
 ### For Continue (VS Code Extension)
 
@@ -74,11 +80,12 @@ Edit `~/.continue/config.json`:
 {
   "models": [
     {
-      "title": "HuggingFace Local",
+      "title": "HuggingFace Kimi-K3",
       "provider": "openai",
-      "model": "microsoft/DialoGPT-medium",
+      "model": "moonshotai/Kimi-K3",
       "apiBase": "http://localhost:8081/v1",
       "apiKey": "hf-coding-assistant-key"
+
     }
   ]
 }
@@ -99,10 +106,11 @@ Authorization: Bearer hf-coding-assistant-key
 Content-Type: application/json
 
 {
-  "model": "microsoft/DialoGPT-medium",
+  "model": "moonshotai/Kimi-K3",
   "messages": [
     {"role": "user", "content": "Write a Python function to sort a list"}
   ]
+
 }
 ```
 
@@ -113,9 +121,10 @@ Authorization: Bearer hf-coding-assistant-key
 Content-Type: application/json
 
 {
-  "model": "microsoft/DialoGPT-medium",
+  "model": "moonshotai/Kimi-K3",
   "prompt": "def fibonacci(n):",
   "max_tokens": 100
+
 }
 ```
 
@@ -128,61 +137,112 @@ GET /health
 
 Edit `.env` file:
 
-- `HF_MODEL_NAME`: HuggingFace model to use (default: microsoft/DialoGPT-medium)
+- `HF_MODEL_NAME`: HuggingFace model to use (default: **moonshotai/Kimi-K3**)
+- `HF_TRUST_REMOTE_CODE`: Allow custom model code (default: `true`, needed for Kimi-K3)
+- `HF_TORCH_DTYPE`: Weight dtype — `bfloat16` / `float16` / `float32` / `auto` (default: `bfloat16` on GPU)
+- `HF_DEVICE_MAP`: Accelerate device map (default: `auto` on GPU)
+
 - `API_KEY`: API key for authentication (change in production!)
-- `MAX_TOKENS`: Maximum tokens per response (default: 2048)
-- `TEMPERATURE`: Response randomness 0.0-1.0 (default: 0.7)
-- `CONTEXT_WINDOW`: Maximum context window size (default: 4096)
+- `MAX_TOKENS`: Maximum tokens per response (default: **32768**)
+- `TEMPERATURE`: Response randomness 0.0-1.0 (default: **0.3** — precise coding)
+- `CONTEXT_WINDOW`: Context budget (default: **1048576** / 1M tokens; trimmed to model max)
+- `CACHE_ENABLED`: Enable response caching (default: `true`)
+- `CACHE_MAX_SIZE`: LRU cache entries (default: `256`)
+- `CACHE_TTL_SECONDS`: Cache entry lifetime (default: `3600`)
+- `MEMORY_MAX_CONVERSATIONS`: In-memory conversation sessions (default: `128`)
 
 ### Understanding Context Window vs Max Tokens
 
-**CONTEXT_WINDOW**: The maximum total size (in tokens) of the conversation history that the model can "see" at once. This includes:
+**CONTEXT_WINDOW**: The maximum total size (in tokens) of the conversation history budget. This includes:
 - System messages
 - Previous user messages
 - Previous assistant responses
 - Current user message
 
-**MAX_TOKENS**: The maximum number of tokens the model can generate in a single response. This is per-request and controls the length of each individual answer.
+The server also reports an **effective** context window (`effective_context_window` on `/health` and `/v1/models`) which is `min(CONTEXT_WINDOW, model_max_length)`.
 
-**Example**:
-- `CONTEXT_WINDOW=4096` - Model can see up to 4,096 tokens of conversation history
-- `MAX_TOKENS=2048` - Each response can be up to 2,048 tokens long
+**MAX_TOKENS**: The maximum number of tokens the model can generate in a single response. This is per-request and controls the length of each individual answer. Actual generation is also capped by the model's native context.
+
+**Defaults (complicated coding)**:
+- `CONTEXT_WINDOW=1048576` — **1M-token** budget for large codebases
+- `MAX_TOKENS=32768` — long multi-file generations when the model supports it
+- `TEMPERATURE=0.3` — more deterministic code output
+
+### Caching & Conversation Memory
+
+The server speeds up repeated and follow-up IDE requests with several layers:
+
+1. **Response cache (L1)** — identical `(model, messages, temperature, max_tokens)` requests return the cached completion instantly (`cached: true` in the JSON body). LRU + TTL eviction.
+2. **Mooncake (L2) — automatic for Moonshot / Kimi models** — when `HF_MODEL_NAME` is a Moonshot model (default `moonshotai/Kimi-K3`), completions are also stored in [Mooncake](https://github.com/kvcache-ai/Mooncake) (`MooncakeDistributedStore`), Kimi’s KVCache-centric store. Survives process restarts when the Mooncake master is running. Falls back to L1-only if Mooncake is not installed or unreachable.
+3. **Conversation memory** — rolling per-session history (via `X-Conversation-ID` header, or `user` / `conversation_id` body fields). History is trimmed to the effective context while reserving room for `MAX_TOKENS`.
+4. **HF KV cache** — `model.generate(..., use_cache=True)` for faster token-by-token decoding.
+
+#### Enabling Mooncake (Moonshot / Kimi)
+
+```bash
+# Install (Linux + CUDA; see Mooncake docs for non-CUDA / CUDA 13 wheels)
+pip install mooncake-transfer-engine
+
+# Start mooncake_master (see https://kvcache-ai.github.io/Mooncake/)
+# then configure .env:
+MOONCAKE_CACHE=auto          # auto | true | false
+MOONCAKE_MASTER=127.0.0.1:50051
+MOONCAKE_PROTOCOL=tcp
+```
+
+`/health` reports `cache.backend` as `mooncake+l1` when connected, or `l1` with `mooncake_error` when falling back.
+
+
+```bash
+# Health includes cache/memory stats and effective context
+curl http://localhost:8081/health
+
+# Clear response cache
+curl -X DELETE -H "Authorization: Bearer hf-coding-assistant-key" \
+  http://localhost:8081/v1/cache
+
+# Clear cache + conversation memory
+curl -X DELETE -H "Authorization: Bearer hf-coding-assistant-key" \
+  "http://localhost:8081/v1/cache?memory=true"
+```
 
 ### Adjusting Context and Token Limits
 
 Configure these in the `.env` file:
 
 ```bash
-# For longer code generation (requires more memory)
-MAX_TOKENS=4096          # Longer individual responses
-CONTEXT_WINDOW=8192      # More conversation history
+# Complicated coding (default) — large repos, multi-file edits
+MAX_TOKENS=32768
+CONTEXT_WINDOW=1048576
+TEMPERATURE=0.3
 
-# For faster, shorter responses (recommended for CPU)
-MAX_TOKENS=1024          # Shorter individual responses
-CONTEXT_WINDOW=2048      # Less conversation history
+# Balanced (good for 7B instruct models on GPU)
+MAX_TOKENS=4096
+CONTEXT_WINDOW=8192
+
+# Faster / lighter (small local models only)
+MAX_TOKENS=1024
+CONTEXT_WINDOW=2048
 ```
 
 **Important Notes**:
 - MAX_TOKENS should always be less than CONTEXT_WINDOW
 - These are server-side defaults; IDEs can override them per-request
 - Larger values require more memory; adjust based on your hardware
-- HuggingFace models typically have smaller native context windows than NIM models
-- DialoGPT models work best with smaller context windows (2048-4096)
+- **moonshotai/Kimi-K3** natively supports a **1M** context window, matching the default `CONTEXT_WINDOW`
+- Smaller HF models have lower native limits — the server reports `effective_context_window` on `/health`
 
 ## Recommended Models for Coding
 
-**Conversational Models:**
-- `microsoft/DialoGPT-medium` - 345M parameters (default, good for general chat)
-- `microsoft/DialoGPT-large` - 762M parameters
+**Default:**
+- `moonshotai/Kimi-K3` - Moonshot Kimi K3 (2.8T MoE / ~104B active, **1M context**) — best for complicated multi-file coding
 
-**Code-Specific Models:**
-- `Salesforce/codegen-350M-mono` - Specialized for code generation
-- `Salesforce/codegen-2B-mono` - Larger code generation model
-- `bigcode/starcoder` - 15B parameters (requires significant resources)
-
-**Instruction-Following Models:**
-- `meta-llama/Llama-2-7b-chat-hf` - 7B parameters (requires HF token)
+**Lighter alternatives:**
 - `mistralai/Mistral-7B-Instruct-v0.1` - 7B parameters
+- `meta-llama/Llama-2-7b-chat-hf` - 7B parameters (requires HF token)
+- `Salesforce/codegen-2B-mono` - Code generation focused
+- `microsoft/DialoGPT-medium` - Small conversational baseline (not ideal for coding)
+
 
 ## Usage Examples
 
@@ -214,28 +274,34 @@ Select code and ask: "Refactor this to be more efficient"
 
 If the model fails to load:
 ```bash
-# Pre-download the model
-python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('microsoft/DialoGPT-medium')"
+# Pre-download the model (Kimi-K3 is very large — ensure disk + GPU capacity)
+python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('moonshotai/Kimi-K3', trust_remote_code=True, torch_dtype='auto', device_map='auto')"
 ```
 
 ### Out of Memory Errors
 
-1. Use a smaller model (e.g., DialoGPT-small)
-2. Ensure you have enough RAM/VRAM
+1. Ensure multi-GPU / enough VRAM for Kimi-K3, or set `HF_MODEL_NAME` to a smaller model
+2. Use `HF_TORCH_DTYPE=bfloat16` (default on CUDA) or `float16`
 3. Close other applications
+
 
 ### Slow Responses
 
 - Use GPU if available
 - Try a smaller model
 - Reduce conversation history length
+- Ensure `CACHE_ENABLED=true` so repeated prompts hit the cache
+- Reuse the same `X-Conversation-ID` for multi-turn sessions
 
 ## Performance Tips
 
 - **GPU Acceleration**: The app automatically uses GPU if available
 - **Model Size**: Start with smaller models and scale up based on your hardware
 - **Memory Management**: Monitor memory usage, especially with larger models
-- **Conversation History**: Clear conversation history periodically for better performance
+- **Conversation History**: Clear conversation history periodically for better performance (`DELETE /v1/cache?memory=true`)
+- **Response Cache**: Keep caching enabled for iterative IDE workflows
+- **Temperature**: Use 0.1–0.3 for more stable code edits
+
 
 ## Security Notes
 
@@ -263,3 +329,46 @@ This application runs on port **8081** by default (different from NIM version on
 - ✅ Enterprise-grade models
 - ⚠️ Requires NVIDIA GPU
 - ⚠️ Requires NGC account
+
+
+## Multi-Node Deployment
+
+This app supports horizontal multi-node deployment via `shared.multinode`.
+
+### Quick enable
+
+```bash
+# In .env (see also deploy/env.multinode.example)
+MULTI_NODE=true
+CLUSTER_NAME=model-serving
+NODE_ID=hf-ide-1
+HOST=0.0.0.0
+PORT=8081
+PUBLIC_URL=https://models.example.com
+SHARED_DATA_DIR=/data/model-serving
+REDIS_URL=redis://redis:6379/0
+USE_REDIS=true
+SECRET_KEY=replace-with-long-random-string
+# Optional: multiple model backends
+BACKEND_URLS=http://nim-a:8000/v1/chat/completions,http://nim-b:8000/v1/chat/completions
+BACKEND_STRATEGY=round_robin
+```
+
+### Architecture notes
+
+| Concern | Approach |
+|--------|----------|
+| Shared auth / chat history | Mount the same `SHARED_DATA_DIR` on every node (NFS/EFS) or set `AUTH_DB_PATH` / `CHAT_DB_PATH` |
+| Load balancing | Put nginx/ALB/ingress in front; enable **sticky sessions** for Streamlit & WebRTC |
+| Socket.IO fan-out | Set `REDIS_URL` + `USE_REDIS=true` so all voice nodes share a message queue |
+| Model backends | `BACKEND_URLS` round-robins NIM / OpenAI-compatible upstreams |
+| Health | `GET /health` (APIs) or sidebar "Cluster / node" (Streamlit) reports `node_id` and peers |
+
+### Docker Compose reference
+
+```bash
+# From repo root — example scales NIM IDE behind nginx + Redis
+docker compose -f deploy/docker-compose.multinode.yml up -d
+```
+
+Full variable reference: [`shared/multinode/README.md`](../shared/multinode/README.md) and [`deploy/env.multinode.example`](../deploy/env.multinode.example).

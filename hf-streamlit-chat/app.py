@@ -13,6 +13,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.auth import AuthManager
 from shared.database import ChatHistory
+from shared.multinode import ClusterInfo, get_multinode_config
+
+# Multi-node configuration
+MN_CFG = get_multinode_config(default_port=8501, app_name="hf-streamlit-chat")
+CLUSTER = ClusterInfo(MN_CFG, app_name="hf-streamlit-chat")
 
 # Configuration
 MODEL_NAME = os.getenv("HF_MODEL_NAME", "microsoft/DialoGPT-medium")
@@ -21,6 +26,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Initialize managers
 auth_manager = AuthManager()
 chat_history = ChatHistory()
+
 
 @st.cache_resource
 def load_model():
@@ -157,8 +163,13 @@ def chat_page():
         st.write(f"👤 User: {st.session_state.username}")
         st.write(f"🤖 Model: {MODEL_NAME}")
         st.write(f"💻 Device: {DEVICE}")
+        with st.expander("Cluster / node"):
+            node = CLUSTER.health()
+            st.caption(f"node: `{node['node']['node_id']}`")
+            st.caption(f"multi_node: `{node['node']['multi_node']}`")
         
         if st.button("Logout"):
+
             if st.session_state.session_token:
                 auth_manager.logout(st.session_state.session_token)
             st.session_state.clear()

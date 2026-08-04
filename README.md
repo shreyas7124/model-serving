@@ -49,6 +49,22 @@ model-serving/
     └── database/
 ```
 
+
+
+## Multi-Node Deployment
+
+All applications support multi-node / multi-replica deployment through `shared/multinode`.
+
+- **Shared helpers**: `shared/multinode/` (`MultiNodeConfig`, `ClusterInfo`, backend pool, Flask/Socket.IO runners)
+- **Shared state**: `SHARED_DATA_DIR` / `AUTH_DB_PATH` / `CHAT_DB_PATH` (auth + chat history)
+- **Redis**: optional `REDIS_URL` for Socket.IO message queues across voice nodes
+- **Backends**: `BACKEND_URLS` for multi-NIM round-robin
+- **Reference stack**: `deploy/docker-compose.multinode.yml` + `deploy/nginx.multinode.conf`
+- **Env template**: `deploy/env.multinode.example`
+- **Docs**: [`shared/multinode/README.md`](shared/multinode/README.md)
+
+Each app README has a **Multi-Node Deployment** section with app-specific ports and notes.
+
 ## License
 
 MIT

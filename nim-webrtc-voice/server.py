@@ -15,20 +15,39 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.auth import AuthManager
 from shared.database import ChatHistory
+from shared.multinode import (
+    BackendPool,
+    ClusterInfo,
+    apply_flask_multinode,
+    get_multinode_config,
+    run_socketio_app,
+)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-change-this')
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 CORS(app, supports_credentials=True)
-socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Multi-node / cluster configuration
+MN_CFG = get_multinode_config(default_port=5000, app_name="nim-webrtc-voice")
+apply_flask_multinode(app, MN_CFG)
+CLUSTER = ClusterInfo(MN_CFG, app_name="nim-webrtc-voice")
+
+# Socket.IO with optional Redis message queue for multi-node fan-out
+_socketio_kwargs = {"cors_allowed_origins": "*"}
+if MN_CFG.use_redis and MN_CFG.redis_url:
+    _socketio_kwargs["message_queue"] = MN_CFG.redis_url
+socketio = SocketIO(app, **_socketio_kwargs)
 
 # Configuration
 NIM_API_URL = os.getenv("NIM_API_URL", "http://localhost:8000/v1/chat/completions")
 MODEL_NAME = os.getenv("NIM_MODEL_NAME", "meta/llama-3.1-8b-instruct")
+if not CLUSTER.backend_pool.urls:
+    CLUSTER.backend_pool = BackendPool([NIM_API_URL], strategy=MN_CFG.backend_strategy)
 
 # Initialize managers
 auth_manager = AuthManager()
 chat_history = ChatHistory()
+
 
 # Store active conversations in memory
 conversations = {}
@@ -108,7 +127,7 @@ def get_conversation(conv_id):
     return jsonify({'messages': messages}), 200
 
 def query_nim_model(messages):
-    """Query the NIM model API"""
+    """Query the NIM model API (multi-backend aware)"""
     try:
         payload = {
             "model": MODEL_NAME,
@@ -116,14 +135,26 @@ def query_nim_model(messages):
             "temperature": 0.7,
             "max_tokens": 512
         }
-        
-        response = requests.post(NIM_API_URL, json=payload, timeout=30)
-        response.raise_for_status()
-        
+        backend = CLUSTER.next_backend() or NIM_API_URL
+
+        try:
+            response = requests.post(backend, json=payload, timeout=30)
+            response.raise_for_status()
+            CLUSTER.backend_pool.mark_success(backend)
+        except Exception:
+            CLUSTER.backend_pool.mark_failure(backend)
+            raise
         result = response.json()
         return result['choices'][0]['message']['content']
     except Exception as e:
         return f"Error: {str(e)}"
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check with multi-node identity"""
+    return jsonify(CLUSTER.health(model=MODEL_NAME)), 200
+
 
 @socketio.on('connect')
 def handle_connect():
@@ -196,4 +227,5 @@ def handle_text_message(data):
     handle_voice_message(data)
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    run_socketio_app(socketio, app, MN_CFG, default_port=5000, debug=not MN_CFG.enabled)
+

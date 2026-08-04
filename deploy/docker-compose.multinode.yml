@@ -1,0 +1,90 @@
+# Reference multi-node stack for model-serving apps.
+# Usage (from repo root):
+#   docker compose -f deploy/docker-compose.multinode.yml up -d
+#
+# Customize which app image/command you run; this example scales the
+# NIM IDE assistant behind nginx with Redis for shared Socket.IO / cache.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  # Shared volume for SQLite auth + chat history across replicas
+  # (For production prefer Postgres/Redis; SQLite on NFS needs care.)
+
+  nim-ide-1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.python
+    working_dir: /app/nim-ide-assistant
+    command: ["python", "server.py"]
+    environment:
+      MULTI_NODE: "true"
+      CLUSTER_NAME: model-serving
+      NODE_ID: nim-ide-1
+      NODE_ROLE: api
+      HOST: 0.0.0.0
+      PORT: "8080"
+      PUBLIC_URL: http://localhost
+      SHARED_DATA_DIR: /data
+      REDIS_URL: redis://redis:6379/0
+      USE_REDIS: "true"
+      SECRET_KEY: change-me-in-production
+      NIM_API_URL: http://host.docker.internal:8000/v1/chat/completions
+      BACKEND_URLS: http://host.docker.internal:8000/v1/chat/completions
+      BACKEND_STRATEGY: round_robin
+      API_KEY: nim-coding-assistant-key
+    volumes:
+      - shared-data:/data
+      - ..:/app
+    depends_on:
+      - redis
+    expose:
+      - "8080"
+
+  nim-ide-2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.python
+    working_dir: /app/nim-ide-assistant
+    command: ["python", "server.py"]
+    environment:
+      MULTI_NODE: "true"
+      CLUSTER_NAME: model-serving
+      NODE_ID: nim-ide-2
+      NODE_ROLE: api
+      HOST: 0.0.0.0
+      PORT: "8080"
+      PUBLIC_URL: http://localhost
+      SHARED_DATA_DIR: /data
+      REDIS_URL: redis://redis:6379/0
+      USE_REDIS: "true"
+      SECRET_KEY: change-me-in-production
+      NIM_API_URL: http://host.docker.internal:8000/v1/chat/completions
+      BACKEND_URLS: http://host.docker.internal:8000/v1/chat/completions
+      API_KEY: nim-coding-assistant-key
+    volumes:
+      - shared-data:/data
+      - ..:/app
+    depends_on:
+      - redis
+    expose:
+      - "8080"
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.multinode.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - nim-ide-1
+      - nim-ide-2
+
+volumes:
+  redis-data:
+  shared-data:

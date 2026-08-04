@@ -8,7 +8,9 @@ An OpenAI-compatible API server that connects NIM models to IDEs like Cline and 
 - 🤖 Powered by NVIDIA NIM models
 - 💻 Works with Cline, Cursor, and other OpenAI-compatible tools
 - 🔑 API key authentication
-- 📝 Optimized for coding tasks
+- 📝 Optimized for complicated multi-file coding tasks
+- 🧠 1M-token context window with automatic history trimming
+- ⚡ In-memory response cache + conversation memory for faster follow-ups
 
 ## Prerequisites
 
@@ -139,9 +141,14 @@ Edit `.env` file:
 - `NIM_API_URL`: URL of your NIM API endpoint
 - `NIM_MODEL_NAME`: Model name to use
 - `API_KEY`: API key for authentication (change in production!)
-- `MAX_TOKENS`: Maximum tokens per response (default: 4096)
-- `TEMPERATURE`: Response randomness 0.0-1.0 (default: 0.7)
-- `CONTEXT_WINDOW`: Maximum context window size (default: 8192)
+- `MAX_TOKENS`: Maximum tokens per response (default: **32768**)
+- `TEMPERATURE`: Response randomness 0.0-1.0 (default: **0.3** — precise coding)
+- `CONTEXT_WINDOW`: Maximum context window size (default: **1048576** / 1M tokens)
+- `CACHE_ENABLED`: Enable response caching (default: `true`)
+- `CACHE_MAX_SIZE`: LRU cache entries (default: `256`)
+- `CACHE_TTL_SECONDS`: Cache entry lifetime (default: `3600`)
+- `MEMORY_MAX_CONVERSATIONS`: In-memory conversation sessions (default: `128`)
+- `REQUEST_TIMEOUT`: Upstream NIM timeout seconds (default: `300`)
 
 ### Understanding Context Window vs Max Tokens
 
@@ -153,29 +160,55 @@ Edit `.env` file:
 
 **MAX_TOKENS**: The maximum number of tokens the model can generate in a single response. This is per-request and controls the length of each individual answer.
 
-**Example**:
-- `CONTEXT_WINDOW=8192` - Model can see up to 8,192 tokens of conversation history
-- `MAX_TOKENS=4096` - Each response can be up to 4,096 tokens long
+**Defaults (complicated coding)**:
+- `CONTEXT_WINDOW=1048576` — up to **1M tokens** of codebase / conversation context
+- `MAX_TOKENS=32768` — long multi-file generations and refactors per reply
+- `TEMPERATURE=0.3` — more deterministic code output
+
+### Caching & Conversation Memory
+
+The server speeds up repeated and follow-up IDE requests with two layers:
+
+1. **Response cache** — identical `(model, messages, temperature, max_tokens)` requests return the cached completion instantly (`cached: true` in the JSON body). LRU + TTL eviction.
+2. **Conversation memory** — rolling per-session history (via `X-Conversation-ID` header, or `user` / `conversation_id` body fields). History is trimmed to fit `CONTEXT_WINDOW` while reserving room for `MAX_TOKENS`.
+
+```bash
+# Health includes cache/memory stats
+curl http://localhost:8080/health
+
+# Clear response cache
+curl -X DELETE -H "Authorization: Bearer nim-coding-assistant-key" \
+  http://localhost:8080/v1/cache
+
+# Clear cache + conversation memory
+curl -X DELETE -H "Authorization: Bearer nim-coding-assistant-key" \
+  "http://localhost:8080/v1/cache?memory=true"
+```
 
 ### Adjusting Context and Token Limits
 
 Configure these in the `.env` file:
 
 ```bash
-# For longer code generation and more conversation history
-MAX_TOKENS=8192          # Longer individual responses
-CONTEXT_WINDOW=16384     # More conversation history
+# Complicated coding (default) — large repos, multi-file edits
+MAX_TOKENS=32768
+CONTEXT_WINDOW=1048576
+TEMPERATURE=0.3
 
-# For faster, shorter responses (less memory usage)
-MAX_TOKENS=2048          # Shorter individual responses
-CONTEXT_WINDOW=4096      # Less conversation history
+# Balanced
+MAX_TOKENS=8192
+CONTEXT_WINDOW=131072
+
+# Faster / lighter (less GPU memory)
+MAX_TOKENS=2048
+CONTEXT_WINDOW=8192
 ```
 
 **Important Notes**:
 - MAX_TOKENS should always be less than CONTEXT_WINDOW
 - These are server-side defaults; IDEs can override them per-request
 - Larger values require more GPU memory
-- The model's native context limit may be lower than your setting
+- The model's native context limit may be lower than your setting — the server still trims prompts to `CONTEXT_WINDOW`
 
 ## Recommended NIM Models for Coding
 
@@ -215,6 +248,8 @@ Select code and ask: "Refactor this to be more efficient"
 1. Use a GPU for better performance
 2. Try a smaller model
 3. Reduce `max_tokens` in requests
+4. Ensure `CACHE_ENABLED=true` so repeated prompts hit the cache
+5. Reuse the same `X-Conversation-ID` so memory can avoid re-sending full history from the client
 
 ### Model Not Found
 
@@ -233,8 +268,53 @@ Select code and ask: "Refactor this to be more efficient"
 - Use GPU for significantly faster inference
 - Adjust `max_tokens` based on your needs
 - Consider using a smaller model for faster responses
-- Cache common requests if possible
+- Keep caching enabled for iterative IDE workflows (retry / re-ask same prompt)
+- Lower `TEMPERATURE` (0.1–0.3) for more stable code edits
+
 
 ## Port Configuration
 
 This application runs on port **8080** by default. You can change this in `server.py` if needed.
+
+
+## Multi-Node Deployment
+
+This app supports horizontal multi-node deployment via `shared.multinode`.
+
+### Quick enable
+
+```bash
+# In .env (see also deploy/env.multinode.example)
+MULTI_NODE=true
+CLUSTER_NAME=model-serving
+NODE_ID=nim-ide-1
+HOST=0.0.0.0
+PORT=8080
+PUBLIC_URL=https://models.example.com
+SHARED_DATA_DIR=/data/model-serving
+REDIS_URL=redis://redis:6379/0
+USE_REDIS=true
+SECRET_KEY=replace-with-long-random-string
+# Optional: multiple model backends
+BACKEND_URLS=http://nim-a:8000/v1/chat/completions,http://nim-b:8000/v1/chat/completions
+BACKEND_STRATEGY=round_robin
+```
+
+### Architecture notes
+
+| Concern | Approach |
+|--------|----------|
+| Shared auth / chat history | Mount the same `SHARED_DATA_DIR` on every node (NFS/EFS) or set `AUTH_DB_PATH` / `CHAT_DB_PATH` |
+| Load balancing | Put nginx/ALB/ingress in front; enable **sticky sessions** for Streamlit & WebRTC |
+| Socket.IO fan-out | Set `REDIS_URL` + `USE_REDIS=true` so all voice nodes share a message queue |
+| Model backends | `BACKEND_URLS` round-robins NIM / OpenAI-compatible upstreams |
+| Health | `GET /health` (APIs) or sidebar "Cluster / node" (Streamlit) reports `node_id` and peers |
+
+### Docker Compose reference
+
+```bash
+# From repo root — example scales NIM IDE behind nginx + Redis
+docker compose -f deploy/docker-compose.multinode.yml up -d
+```
+
+Full variable reference: [`shared/multinode/README.md`](../shared/multinode/README.md) and [`deploy/env.multinode.example`](../deploy/env.multinode.example).

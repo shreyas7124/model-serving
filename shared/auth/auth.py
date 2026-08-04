@@ -9,10 +9,20 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import os
 
+def _default_auth_db_path() -> str:
+    """Prefer multi-node shared paths when configured."""
+    explicit = os.getenv("AUTH_DB_PATH", "").strip()
+    if explicit:
+        return explicit
+    shared = os.getenv("SHARED_DATA_DIR", "shared/database").strip() or "shared/database"
+    return os.path.join(shared, "users.db")
+
+
 class AuthManager:
-    def __init__(self, db_path: str = "shared/database/users.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or _default_auth_db_path()
         self._init_db()
+
     
     def _init_db(self):
         """Initialize the user database"""

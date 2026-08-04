@@ -8,10 +8,20 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import os
 
+def _default_chat_db_path() -> str:
+    """Prefer multi-node shared paths when configured."""
+    explicit = os.getenv("CHAT_DB_PATH", "").strip()
+    if explicit:
+        return explicit
+    shared = os.getenv("SHARED_DATA_DIR", "shared/database").strip() or "shared/database"
+    return os.path.join(shared, "chat_history.db")
+
+
 class ChatHistory:
-    def __init__(self, db_path: str = "shared/database/chat_history.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or _default_chat_db_path()
         self._init_db()
+
     
     def _init_db(self):
         """Initialize the chat history database"""

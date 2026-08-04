@@ -130,3 +130,46 @@ python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.f
 Downloaded models are cached in:
 - Linux/Mac: `~/.cache/huggingface/`
 - Windows: `C:\Users\<username>\.cache\huggingface\`
+
+
+## Multi-Node Deployment
+
+This app supports horizontal multi-node deployment via `shared.multinode`.
+
+### Quick enable
+
+```bash
+# In .env (see also deploy/env.multinode.example)
+MULTI_NODE=true
+CLUSTER_NAME=model-serving
+NODE_ID=hf-chat-1
+HOST=0.0.0.0
+PORT=8501
+PUBLIC_URL=https://models.example.com
+SHARED_DATA_DIR=/data/model-serving
+REDIS_URL=redis://redis:6379/0
+USE_REDIS=true
+SECRET_KEY=replace-with-long-random-string
+# Optional: multiple model backends
+BACKEND_URLS=http://nim-a:8000/v1/chat/completions,http://nim-b:8000/v1/chat/completions
+BACKEND_STRATEGY=round_robin
+```
+
+### Architecture notes
+
+| Concern | Approach |
+|--------|----------|
+| Shared auth / chat history | Mount the same `SHARED_DATA_DIR` on every node (NFS/EFS) or set `AUTH_DB_PATH` / `CHAT_DB_PATH` |
+| Load balancing | Put nginx/ALB/ingress in front; enable **sticky sessions** for Streamlit & WebRTC |
+| Socket.IO fan-out | Set `REDIS_URL` + `USE_REDIS=true` so all voice nodes share a message queue |
+| Model backends | `BACKEND_URLS` round-robins NIM / OpenAI-compatible upstreams |
+| Health | `GET /health` (APIs) or sidebar "Cluster / node" (Streamlit) reports `node_id` and peers |
+
+### Docker Compose reference
+
+```bash
+# From repo root — example scales NIM IDE behind nginx + Redis
+docker compose -f deploy/docker-compose.multinode.yml up -d
+```
+
+Full variable reference: [`shared/multinode/README.md`](../shared/multinode/README.md) and [`deploy/env.multinode.example`](../deploy/env.multinode.example).

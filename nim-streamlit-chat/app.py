@@ -12,14 +12,23 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.auth import AuthManager
 from shared.database import ChatHistory
+from shared.multinode import ClusterInfo, get_multinode_config
+
+# Multi-node configuration
+MN_CFG = get_multinode_config(default_port=8501, app_name="nim-streamlit-chat")
+CLUSTER = ClusterInfo(MN_CFG, app_name="nim-streamlit-chat")
 
 # Configuration
 NIM_API_URL = os.getenv("NIM_API_URL", "http://localhost:8000/v1/chat/completions")
 MODEL_NAME = os.getenv("NIM_MODEL_NAME", "meta/llama-3.1-8b-instruct")
+if not CLUSTER.backend_pool.urls:
+    from shared.multinode import BackendPool
+    CLUSTER.backend_pool = BackendPool([NIM_API_URL], strategy=MN_CFG.backend_strategy)
 
 # Initialize managers
 auth_manager = AuthManager()
 chat_history = ChatHistory()
+
 
 def init_session_state():
     """Initialize session state variables"""
@@ -85,22 +94,28 @@ def login_page():
             st.rerun()
 
 def query_nim_model(messages):
-    """Query the NIM model API"""
+    """Query the NIM model API (supports multi-backend pool)"""
     try:
         payload = {
             "model": MODEL_NAME,
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 1024
+            "max_tokens": 512
         }
-        
-        response = requests.post(NIM_API_URL, json=payload, timeout=30)
-        response.raise_for_status()
-        
+        backend = CLUSTER.next_backend() or NIM_API_URL
+
+        try:
+            response = requests.post(backend, json=payload, timeout=30)
+            response.raise_for_status()
+            CLUSTER.backend_pool.mark_success(backend)
+        except Exception:
+            CLUSTER.backend_pool.mark_failure(backend)
+            raise
         result = response.json()
         return result['choices'][0]['message']['content']
     except Exception as e:
         return f"Error: {str(e)}"
+
 
 def chat_page():
     """Display chat interface"""
@@ -109,8 +124,14 @@ def chat_page():
     # Sidebar
     with st.sidebar:
         st.write(f"👤 User: {st.session_state.username}")
+        with st.expander("Cluster / node"):
+            node = CLUSTER.health()
+            st.caption(f"node: `{node['node']['node_id']}`")
+            st.caption(f"multi_node: `{node['node']['multi_node']}`")
+            st.caption(f"backends: {node['backends']['count']}")
         
         if st.button("Logout"):
+
             if st.session_state.session_token:
                 auth_manager.logout(st.session_state.session_token)
             st.session_state.clear()
