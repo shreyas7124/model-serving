@@ -14,10 +14,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.auth import AuthManager
 from shared.database import ChatHistory
 from shared.multinode import ClusterInfo, get_multinode_config
+from shared.tools import get_web_access_tool
 
 # Multi-node configuration
 MN_CFG = get_multinode_config(default_port=8501, app_name="hf-streamlit-chat")
 CLUSTER = ClusterInfo(MN_CFG, app_name="hf-streamlit-chat")
+WEB = get_web_access_tool("hf-streamlit-chat")
+
 
 # Configuration
 MODEL_NAME = os.getenv("HF_MODEL_NAME", "microsoft/DialoGPT-medium")
@@ -110,14 +113,22 @@ def login_page():
             st.session_state.username = "Guest"
             st.rerun()
 
-def generate_response(prompt, tokenizer, model):
+def generate_response(prompt, tokenizer, model, web_context: str = ""):
     """Generate response using HuggingFace model"""
     try:
+        # Optionally prepend fetched web page context (full pages already logged)
+        model_prompt = prompt
+        if web_context:
+            model_prompt = (
+                f"{web_context}\n\n"
+                f"User question (may reference the URL(s) above):\n{prompt}"
+            )
         # Encode the new user input, add the eos_token and return a tensor in Pytorch
         new_input_ids = tokenizer.encode(
-            prompt + tokenizer.eos_token, 
+            model_prompt + tokenizer.eos_token,
             return_tensors='pt'
         ).to(DEVICE)
+
         
         # Append the new user input tokens to the chat history
         bot_input_ids = torch.cat(
@@ -167,8 +178,15 @@ def chat_page():
             node = CLUSTER.health()
             st.caption(f"node: `{node['node']['node_id']}`")
             st.caption(f"multi_node: `{node['node']['multi_node']}`")
+        with st.expander("Web access"):
+            ws = WEB.stats()
+            st.caption(f"enabled: `{ws['enabled']}`")
+            st.caption(f"fetches: `{ws['fetches']}` failures: `{ws['failures']}`")
+            st.caption(f"log: `{ws['log_file']}`")
+            st.caption("URLs in messages are fetched; full page text is logged.")
         
         if st.button("Logout"):
+
 
             if st.session_state.session_token:
                 auth_manager.logout(st.session_state.session_token)
@@ -230,11 +248,32 @@ def chat_page():
                 prompt
             )
         
+        # Fetch any URLs (full content logged server-side, not only model context)
+        session_key = str(
+            st.session_state.conversation_id
+            or st.session_state.user_id
+            or st.session_state.username
+            or "guest"
+        )
+        web_results, web_context = WEB.process_user_text(prompt, session_id=session_key)
+        if web_results:
+            with st.expander(f"🌐 Fetched {len(web_results)} URL(s) (full content logged)"):
+                for wr in web_results:
+                    st.markdown(
+                        f"- `{wr.url}` — "
+                        f"{'OK' if wr.ok else 'FAIL'} "
+                        f"status={wr.status_code} "
+                        f"log=`{wr.log_path}`"
+                    )
+
         # Get assistant response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                response = generate_response(prompt, tokenizer, model)
+                response = generate_response(
+                    prompt, tokenizer, model, web_context=web_context
+                )
                 st.markdown(response)
+
         
         # Add assistant message
         st.session_state.messages.append({"role": "assistant", "content": response})

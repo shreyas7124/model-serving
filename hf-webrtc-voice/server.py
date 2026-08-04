@@ -22,6 +22,8 @@ from shared.multinode import (
     get_multinode_config,
     run_socketio_app,
 )
+from shared.tools import get_web_access_tool
+
 
 app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
@@ -44,6 +46,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Initialize managers
 auth_manager = AuthManager()
 chat_history = ChatHistory()
+WEB = get_web_access_tool("hf-webrtc-voice")
+
 
 
 # Load model
@@ -137,17 +141,26 @@ def get_conversation(conv_id):
 @app.route('/health', methods=['GET'])
 def health():
     """Health check with multi-node identity"""
-    return jsonify(CLUSTER.health(model=MODEL_NAME, device=DEVICE)), 200
+    return jsonify(
+        CLUSTER.health(model=MODEL_NAME, device=DEVICE, web_access=WEB.stats())
+    ), 200
 
 
-def generate_response(prompt, chat_history_ids):
+def generate_response(prompt, chat_history_ids, web_context: str = ""):
     """Generate response using HuggingFace model"""
 
     try:
+        model_prompt = prompt
+        if web_context:
+            model_prompt = (
+                f"{web_context}\n\n"
+                f"User question (may reference the URL(s) above):\n{prompt}"
+            )
         new_input_ids = tokenizer.encode(
-            prompt + tokenizer.eos_token, 
+            model_prompt + tokenizer.eos_token,
             return_tensors='pt'
         ).to(DEVICE)
+
         
         bot_input_ids = torch.cat(
             [chat_history_ids, new_input_ids], 
@@ -228,9 +241,35 @@ def handle_voice_message(data):
     # Save to database if logged in
     if conv['id']:
         chat_history.add_message(conv['id'], "user", text)
+
+    # Internet access: fetch URLs; log full page content (not only model context)
+    session_key = str(conv.get("id") or request.sid)
+    web_results, web_context = WEB.process_user_text(text, session_id=session_key)
+    if web_results:
+        emit(
+            "web_fetch",
+            {
+                "urls": [
+                    {
+                        "url": wr.url,
+                        "ok": wr.ok,
+                        "status_code": wr.status_code,
+                        "title": wr.title,
+                        "log_path": wr.log_path,
+                        "content_sha256": wr.content_sha256,
+                        "raw_length": wr.raw_length,
+                        "error": wr.error,
+                    }
+                    for wr in web_results
+                ],
+                "log_file": WEB.log_file_path,
+            },
+        )
     
     # Get AI response
-    response, new_history_ids = generate_response(text, conv['chat_history_ids'])
+    response, new_history_ids = generate_response(
+        text, conv['chat_history_ids'], web_context=web_context
+    )
     conv['chat_history_ids'] = new_history_ids
     
     # Add assistant message
@@ -242,6 +281,7 @@ def handle_voice_message(data):
     
     # Send response back to client
     emit('ai_response', {'text': response})
+
 
 @socketio.on('text_message')
 def handle_text_message(data):

@@ -13,10 +13,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.auth import AuthManager
 from shared.database import ChatHistory
 from shared.multinode import ClusterInfo, get_multinode_config
+from shared.tools import get_web_access_tool
 
 # Multi-node configuration
 MN_CFG = get_multinode_config(default_port=8501, app_name="nim-streamlit-chat")
 CLUSTER = ClusterInfo(MN_CFG, app_name="nim-streamlit-chat")
+WEB = get_web_access_tool("nim-streamlit-chat")
+
 
 # Configuration
 NIM_API_URL = os.getenv("NIM_API_URL", "http://localhost:8000/v1/chat/completions")
@@ -129,8 +132,15 @@ def chat_page():
             st.caption(f"node: `{node['node']['node_id']}`")
             st.caption(f"multi_node: `{node['node']['multi_node']}`")
             st.caption(f"backends: {node['backends']['count']}")
+        with st.expander("Web access"):
+            ws = WEB.stats()
+            st.caption(f"enabled: `{ws['enabled']}`")
+            st.caption(f"fetches: `{ws['fetches']}` failures: `{ws['failures']}`")
+            st.caption(f"log: `{ws['log_file']}`")
+            st.caption("URLs in messages are fetched; full page text is logged.")
         
         if st.button("Logout"):
+
 
             if st.session_state.session_token:
                 auth_manager.logout(st.session_state.session_token)
@@ -190,11 +200,34 @@ def chat_page():
                 prompt
             )
         
+        # Fetch any URLs in the user message (full content logged server-side)
+        session_key = str(
+            st.session_state.conversation_id
+            or st.session_state.user_id
+            or st.session_state.username
+            or "guest"
+        )
+        model_messages, web_results = WEB.enrich_messages(
+            st.session_state.messages,
+            user_text=prompt,
+            session_id=session_key,
+        )
+        if web_results:
+            with st.expander(f"🌐 Fetched {len(web_results)} URL(s) (full content logged)"):
+                for wr in web_results:
+                    st.markdown(
+                        f"- `{wr.url}` — "
+                        f"{'OK' if wr.ok else 'FAIL'} "
+                        f"status={wr.status_code} "
+                        f"log=`{wr.log_path}`"
+                    )
+
         # Get assistant response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                response = query_nim_model(st.session_state.messages)
+                response = query_nim_model(model_messages)
                 st.markdown(response)
+
         
         # Add assistant message
         st.session_state.messages.append({"role": "assistant", "content": response})

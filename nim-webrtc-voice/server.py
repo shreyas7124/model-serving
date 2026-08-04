@@ -22,6 +22,8 @@ from shared.multinode import (
     get_multinode_config,
     run_socketio_app,
 )
+from shared.tools import get_web_access_tool
+
 
 app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
@@ -47,6 +49,8 @@ if not CLUSTER.backend_pool.urls:
 # Initialize managers
 auth_manager = AuthManager()
 chat_history = ChatHistory()
+WEB = get_web_access_tool("nim-webrtc-voice")
+
 
 
 # Store active conversations in memory
@@ -153,7 +157,8 @@ def query_nim_model(messages):
 @app.route('/health', methods=['GET'])
 def health():
     """Health check with multi-node identity"""
-    return jsonify(CLUSTER.health(model=MODEL_NAME)), 200
+    return jsonify(CLUSTER.health(model=MODEL_NAME, web_access=WEB.stats())), 200
+
 
 
 @socketio.on('connect')
@@ -207,9 +212,37 @@ def handle_voice_message(data):
     # Save to database if logged in
     if conv['id']:
         chat_history.add_message(conv['id'], "user", text)
+
+    # Internet access: fetch URLs; log full page content (not only model context)
+    session_key = str(conv.get("id") or request.sid)
+    model_messages, web_results = WEB.enrich_messages(
+        conv["messages"],
+        user_text=text,
+        session_id=session_key,
+    )
+    if web_results:
+        emit(
+            "web_fetch",
+            {
+                "urls": [
+                    {
+                        "url": wr.url,
+                        "ok": wr.ok,
+                        "status_code": wr.status_code,
+                        "title": wr.title,
+                        "log_path": wr.log_path,
+                        "content_sha256": wr.content_sha256,
+                        "raw_length": wr.raw_length,
+                        "error": wr.error,
+                    }
+                    for wr in web_results
+                ],
+                "log_file": WEB.log_file_path,
+            },
+        )
     
     # Get AI response
-    response = query_nim_model(conv['messages'])
+    response = query_nim_model(model_messages)
     
     # Add assistant message
     conv['messages'].append({"role": "assistant", "content": response})
@@ -220,6 +253,7 @@ def handle_voice_message(data):
     
     # Send response back to client
     emit('ai_response', {'text': response})
+
 
 @socketio.on('text_message')
 def handle_text_message(data):

@@ -132,6 +132,41 @@ Downloaded models are cached in:
 - Windows: `C:\Users\<username>\.cache\huggingface\`
 
 
+
+
+## Internet access tool
+
+When a user message contains `http://` or `https://` URLs, the app:
+
+1. Fetches each page
+2. Converts HTML to readable text for the model (may truncate for the prompt)
+3. **Always logs the URL and the full fetched body** under `WEB_ACCESS_LOG_DIR` (default `shared/database/web_access_logs/`)
+
+### Logs (full content, not just the model snippet)
+
+| Artifact | Location |
+|----------|----------|
+| Fixed index + full body stream (no rotation) | `WEB_ACCESS_LOG_DIR/<app>-web-access.log` |
+| Per-URL full content files | `WEB_ACCESS_LOG_DIR/pages/<app>/*.txt` |
+
+Each per-URL file includes the URL, status, title, SHA-256, and the **complete** extracted text.
+
+**Log full ⇒ web access terminates** (no rotating backups). Clear logs or raise `WEB_ACCESS_LOG_MAX_SIZE` (e.g. `2TB`) to resume after restart.
+
+### Config
+
+```bash
+WEB_ACCESS_ENABLED=true
+WEB_ACCESS_LOG_DIR=shared/database/web_access_logs
+WEB_ACCESS_LOG_MAX_SIZE=1TB              # e.g. 50GB, 1TB, 2GiB; access stops when full
+WEB_ACCESS_TIMEOUT=20
+WEB_ACCESS_MAX_BYTES=2000000
+WEB_ACCESS_MAX_PROMPT_CHARS=12000
+WEB_ACCESS_MAX_URLS=5
+```
+
+Disable with `WEB_ACCESS_ENABLED=false`.
+
 ## Multi-Node Deployment
 
 This app supports horizontal multi-node deployment via `shared.multinode`.
