@@ -277,9 +277,39 @@ Select code and ask: "Refactor this to be more efficient"
 This application runs on port **8080** by default. You can change this in `server.py` if needed.
 
 
+## NeMo Switchyard (multi-model + escalation)
+
+Route IDE traffic across several NIM backends with independent deployment parameters.
+
+```bash
+# .env
+SWITCHYARD_ENABLED=true
+SWITCHYARD_STRATEGY=escalation
+SWITCHYARD_ROUTE_ID=switchyard/agent
+SWITCHYARD_CONFIG=./switchyard-models.example.json
+```
+
+Or set tiers via env (`SWITCHYARD_WEAK_*`, `SWITCHYARD_STRONG_*`, `SWITCHYARD_JUDGE_*`) — each can have its own URL, GPUs, TP size, max_tokens, etc.
+
+| IDE model field | Behavior |
+|-----------------|----------|
+| `switchyard/agent` | Escalation route (weak first, latch to strong) |
+| `meta/llama-3.1-8b-instruct` (etc.) | Direct to that model’s backend |
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" http://localhost:8080/v1/models
+# Reset escalation latch for a session
+curl -X DELETE -H "Authorization: Bearer $API_KEY" \
+  -H "X-Conversation-ID: my-session" \
+  http://localhost:8080/v1/switchyard/session
+```
+
+Full reference: [`shared/switchyard/README.md`](../shared/switchyard/README.md).
+
 ## Multi-Node Deployment
 
 This app supports horizontal multi-node deployment via `shared.multinode`.
+
 
 ### Quick enable
 

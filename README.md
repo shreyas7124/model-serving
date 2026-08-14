@@ -63,6 +63,18 @@ All applications support multi-node / multi-replica deployment through `shared/m
 - **Env template**: `deploy/env.multinode.example`
 - **Docs**: [`shared/multinode/README.md`](shared/multinode/README.md)
 
+## NeMo Switchyard (IDE assistants)
+
+**nim-ide-assistant** and **hf-ide-assistant** support [NeMo Switchyard](https://github.com/NVIDIA-NeMo/Switchyard)-style multi-model routing:
+
+- Select several models; clients use route id `switchyard/agent` or a specific model id
+- **Escalation router**: weak → judge → strong session latch
+- **Independent deployment parameters** per model (backends, GPUs, TP, dtype, timeouts, …)
+- Optional export to official `switchyard-server` `routes.toml`
+
+Docs: [`shared/switchyard/README.md`](shared/switchyard/README.md)  
+Examples: `nim-ide-assistant/switchyard-models.example.json`, `hf-ide-assistant/switchyard-models.example.json`
+
 Each app README has a **Multi-Node Deployment** section with app-specific ports and notes.
 
 ## License

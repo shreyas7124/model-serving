@@ -6,6 +6,7 @@ Tuned for complicated coding workloads:
   - 1M context window
   - High max-token responses for multi-file generation
   - Response caching + conversation memory for faster follow-ups
+  - NeMo Switchyard multi-model selection + escalation router
 """
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -26,6 +27,11 @@ from shared.multinode import (
     apply_flask_multinode,
     get_multinode_config,
     run_flask_app,
+)
+from shared.switchyard import (
+    get_switchyard_config,
+    get_switchyard_router,
+    write_routes_toml,
 )
 
 app = Flask(__name__)
@@ -81,6 +87,26 @@ conversation_memory = ConversationMemory(
     max_conversations=MEMORY_MAX_CONVERSATIONS,
 )
 
+# --- NeMo Switchyard (multi-model + escalation) ---
+SY_CFG = get_switchyard_config(
+    default_model_id=MODEL_NAME,
+    default_backend_url=NIM_API_URL,
+    owned_by="nim-switchyard",
+    reload=True,
+)
+SY_ROUTER = get_switchyard_router(
+    SY_CFG,
+    fallback_backend=lambda: CLUSTER.next_backend() or NIM_API_URL,
+    fallback_model_id=MODEL_NAME,
+    reload=True,
+)
+if SY_CFG.enabled and SY_CFG.routes_toml_path:
+    try:
+        path = write_routes_toml(SY_CFG, SY_CFG.routes_toml_path)
+        print(f"Switchyard routes.toml written: {path}")
+    except Exception as exc:
+        print(f"Switchyard routes.toml export failed: {exc}")
+
 
 def verify_api_key(req):
     """Verify API key from request"""
@@ -98,36 +124,43 @@ def ensure_system_message(messages):
     return list(messages)
 
 
-def merge_with_memory(conversation_id, messages, max_tokens):
+def merge_with_memory(conversation_id, messages, max_tokens, context_window=None):
     """
     Merge client messages with server-side conversation memory and trim
     to CONTEXT_WINDOW, reserving room for the completion.
     """
     messages = ensure_system_message(messages)
+    window = context_window or CONTEXT_WINDOW
+    original_window = conversation_memory.context_window
+    conversation_memory.context_window = window
+    try:
+        if conversation_id:
+            stored = conversation_memory.get(conversation_id)
+            if stored:
+                # Prefer full client history when it is longer; otherwise extend memory
+                if len(messages) <= len(stored):
+                    # Client may only send the latest turn — append new user msgs
+                    known = {(m.get("role"), m.get("content")) for m in stored}
+                    merged = list(stored)
+                    for msg in messages:
+                        key = (msg.get("role"), msg.get("content"))
+                        if key not in known and msg.get("role") != "system":
+                            merged.append(
+                                {"role": msg["role"], "content": msg.get("content", "")}
+                            )
+                    messages = merged
 
-    if conversation_id:
-        stored = conversation_memory.get(conversation_id)
-        if stored:
-            # Prefer full client history when it is longer; otherwise extend memory
-            if len(messages) <= len(stored):
-                # Client may only send the latest turn — append new user msgs
-                known = {(m.get("role"), m.get("content")) for m in stored}
-                merged = list(stored)
-                for msg in messages:
-                    key = (msg.get("role"), msg.get("content"))
-                    if key not in known and msg.get("role") != "system":
-                        merged.append({"role": msg["role"], "content": msg.get("content", "")})
-                messages = merged
+        trimmed = conversation_memory.trim_to_context(
+            messages,
+            reserve_for_response=max_tokens,
+        )
 
-    trimmed = conversation_memory.trim_to_context(
-        messages,
-        reserve_for_response=max_tokens,
-    )
+        if conversation_id:
+            conversation_memory.set(conversation_id, trimmed)
 
-    if conversation_id:
-        conversation_memory.set(conversation_id, trimmed)
-
-    return trimmed
+        return trimmed
+    finally:
+        conversation_memory.context_window = original_window
 
 
 def remember_exchange(conversation_id, messages, assistant_content):
@@ -149,11 +182,38 @@ def remember_exchange(conversation_id, messages, assistant_content):
         pass
 
 
+def _legacy_upstream_chat(messages, temperature, max_tokens, stream, model_name):
+    """Single-backend NIM path (Switchyard disabled)."""
+    nim_payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    backend = CLUSTER.next_backend() or NIM_API_URL
+    try:
+        response = requests.post(backend, json=nim_payload, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        CLUSTER.backend_pool.mark_success(backend)
+    except Exception:
+        CLUSTER.backend_pool.mark_failure(backend)
+        raise
+    return response.json()
+
+
 @app.route("/v1/models", methods=["GET"])
 def list_models():
     """List available models (OpenAI compatible)"""
     if not verify_api_key(request):
         return jsonify({"error": "Invalid API key"}), 401
+
+    if SY_CFG.enabled:
+        payload = SY_ROUTER.list_models_payload()
+        # Ensure created timestamps
+        for item in payload.get("data", []):
+            item.setdefault("created", int(datetime.now().timestamp()))
+        return jsonify(payload)
 
     return jsonify(
         {
@@ -183,6 +243,7 @@ def chat_completions():
     temperature = data.get("temperature", DEFAULT_TEMPERATURE)
     max_tokens = int(data.get("max_tokens", DEFAULT_MAX_TOKENS))
     stream = data.get("stream", False)
+    requested_model = data.get("model") or MODEL_NAME
     conversation_id = (
         request.headers.get("X-Conversation-ID")
         or data.get("user")
@@ -192,13 +253,28 @@ def chat_completions():
     # Cap max_tokens so prompt + completion fit the context window
     max_tokens = max(1, min(max_tokens, CONTEXT_WINDOW - 512))
 
-    messages = merge_with_memory(conversation_id, messages, max_tokens)
+    # Per-model context when Switchyard selects a specific tier
+    ctx_window = CONTEXT_WINDOW
+    if SY_CFG.enabled:
+        spec = SY_ROUTER.resolve_spec(requested_model)
+        if spec is None and SY_CFG.weak():
+            spec = SY_CFG.weak()
+        if spec:
+            ctx_window = spec.context_window or CONTEXT_WINDOW
+            max_tokens = max(1, min(max_tokens, ctx_window - 512))
+
+    messages = merge_with_memory(
+        conversation_id, messages, max_tokens, context_window=ctx_window
+    )
 
     # Response cache (skip streaming — not cacheable as a single JSON body)
+    cache_model = requested_model or MODEL_NAME
+    if SY_CFG.enabled:
+        cache_model = f"sy:{SY_CFG.strategy}:{cache_model}"
     cache_key = None
     if not stream:
         cache_key = response_cache.make_key(
-            MODEL_NAME, messages, temperature, max_tokens
+            cache_model, messages, temperature, max_tokens
         )
         cached = response_cache.get(cache_key)
         if cached is not None:
@@ -207,39 +283,33 @@ def chat_completions():
             return jsonify(result)
 
     try:
-        nim_payload = {
-            "model": MODEL_NAME,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream,
-        }
-
-        backend = CLUSTER.next_backend() or NIM_API_URL
-        try:
-            response = requests.post(
-                backend, json=nim_payload, timeout=REQUEST_TIMEOUT
+        if SY_CFG.enabled:
+            result, assistant_content, _served = SY_ROUTER.chat_completions(
+                messages,
+                requested_model=requested_model,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens),
+                session_id=conversation_id or "default",
+                stream=bool(stream),
             )
-            response.raise_for_status()
-            CLUSTER.backend_pool.mark_success(backend)
-        except Exception:
-            CLUSTER.backend_pool.mark_failure(backend)
-            raise
-        result = response.json()
-
-        # Store assistant reply in memory + cache
-
-
-        try:
-            assistant_content = result["choices"][0]["message"]["content"]
-            remember_exchange(conversation_id, messages, assistant_content)
-        except (KeyError, IndexError, TypeError):
-            pass
+            if assistant_content:
+                remember_exchange(conversation_id, messages, assistant_content)
+        else:
+            result = _legacy_upstream_chat(
+                messages, temperature, max_tokens, stream, MODEL_NAME
+            )
+            try:
+                assistant_content = result["choices"][0]["message"]["content"]
+                remember_exchange(conversation_id, messages, assistant_content)
+            except (KeyError, IndexError, TypeError):
+                pass
 
         if cache_key is not None:
             response_cache.set(cache_key, result)
 
-        result["cached"] = False
+        if isinstance(result, dict):
+            result = dict(result)
+            result["cached"] = False
         return jsonify(result)
 
     except Exception as e:
@@ -268,6 +338,13 @@ def completions():
     temperature = data.get("temperature", DEFAULT_TEMPERATURE)
     max_tokens = int(data.get("max_tokens", DEFAULT_MAX_TOKENS))
     max_tokens = max(1, min(max_tokens, CONTEXT_WINDOW - 512))
+    requested_model = data.get("model") or MODEL_NAME
+    conversation_id = (
+        request.headers.get("X-Conversation-ID")
+        or data.get("user")
+        or data.get("conversation_id")
+        or "completion"
+    )
 
     messages = [
         {"role": "system", "content": CODING_SYSTEM_PROMPT},
@@ -277,8 +354,11 @@ def completions():
         messages, reserve_for_response=max_tokens
     )
 
+    cache_model = requested_model or MODEL_NAME
+    if SY_CFG.enabled:
+        cache_model = f"sy:{SY_CFG.strategy}:{cache_model}"
     cache_key = response_cache.make_key(
-        MODEL_NAME, messages, temperature, max_tokens, extra={"mode": "completion"}
+        cache_model, messages, temperature, max_tokens, extra={"mode": "completion"}
     )
     cached = response_cache.get(cache_key)
     if cached is not None:
@@ -287,28 +367,21 @@ def completions():
         return jsonify(result)
 
     try:
-        nim_payload = {
-            "model": MODEL_NAME,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-
-        backend = CLUSTER.next_backend() or NIM_API_URL
-        try:
-            response = requests.post(
-                backend, json=nim_payload, timeout=REQUEST_TIMEOUT
+        if SY_CFG.enabled:
+            nim_response, text, served = SY_ROUTER.chat_completions(
+                messages,
+                requested_model=requested_model,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens),
+                session_id=conversation_id,
             )
-            response.raise_for_status()
-            CLUSTER.backend_pool.mark_success(backend)
-        except Exception:
-            CLUSTER.backend_pool.mark_failure(backend)
-            raise
-
-        nim_response = response.json()
-        text = nim_response["choices"][0]["message"]["content"]
-
-
+            model_out = (served.id if served else None) or requested_model or MODEL_NAME
+        else:
+            nim_response = _legacy_upstream_chat(
+                messages, temperature, max_tokens, False, MODEL_NAME
+            )
+            text = nim_response["choices"][0]["message"]["content"]
+            model_out = MODEL_NAME
 
         completion_response = {
             "id": nim_response.get(
@@ -318,19 +391,23 @@ def completions():
             "created": nim_response.get(
                 "created", int(datetime.now().timestamp())
             ),
-            "model": MODEL_NAME,
+            "model": model_out,
             "choices": [
                 {
                     "text": text,
                     "index": 0,
-                    "finish_reason": nim_response["choices"][0].get(
-                        "finish_reason", "stop"
+                    "finish_reason": (
+                        nim_response.get("choices", [{}])[0].get("finish_reason", "stop")
+                        if isinstance(nim_response.get("choices"), list)
+                        else "stop"
                     ),
                 }
             ],
             "usage": nim_response.get("usage", {}),
             "cached": False,
         }
+        if isinstance(nim_response, dict) and nim_response.get("switchyard"):
+            completion_response["switchyard"] = nim_response["switchyard"]
 
         response_cache.set(cache_key, completion_response)
         return jsonify(completion_response)
@@ -361,9 +438,9 @@ def health():
             temperature=DEFAULT_TEMPERATURE,
             cache=response_cache.stats(),
             memory=conversation_memory.stats(),
+            switchyard=SY_ROUTER.health_block(),
         )
     )
-
 
 
 @app.route("/v1/cache", methods=["DELETE"])
@@ -380,6 +457,8 @@ def clear_cache():
     response_cache.clear()
     if clear_memory:
         conversation_memory.clear()
+        if SY_ROUTER.escalation and request.args.get("session"):
+            SY_ROUTER.escalation.reset_session(request.args.get("session"))
 
     return jsonify(
         {
@@ -387,8 +466,28 @@ def clear_cache():
             "memory_cleared": clear_memory,
             "cache": response_cache.stats(),
             "memory": conversation_memory.stats(),
+            "switchyard": SY_ROUTER.health_block(),
         }
     )
+
+
+@app.route("/v1/switchyard/session", methods=["DELETE"])
+def reset_switchyard_session():
+    """Reset escalation latch/streak for a conversation session."""
+    if not verify_api_key(request):
+        return jsonify({"error": "Invalid API key"}), 401
+    if not SY_CFG.enabled or not SY_ROUTER.escalation:
+        return jsonify({"error": "Escalation router not active"}), 400
+    data = request.json or {}
+    session_id = (
+        request.headers.get("X-Conversation-ID")
+        or data.get("session_id")
+        or data.get("conversation_id")
+        or request.args.get("session")
+        or "default"
+    )
+    SY_ROUTER.escalation.reset_session(session_id)
+    return jsonify({"status": "reset", "session_id": session_id})
 
 
 if __name__ == "__main__":
@@ -400,10 +499,27 @@ if __name__ == "__main__":
     print(f"Context Window: {CONTEXT_WINDOW}")
     print(f"Cache Enabled: {CACHE_ENABLED} (size={CACHE_MAX_SIZE}, ttl={CACHE_TTL_SECONDS}s)")
     print(f"Conversation Memory: max {MEMORY_MAX_CONVERSATIONS} sessions")
+    if SY_CFG.enabled:
+        print(
+            f"Switchyard: ON  strategy={SY_CFG.strategy}  route_id={SY_CFG.route_id}  "
+            f"models={len(SY_CFG.models)}"
+        )
+        for m in SY_CFG.models:
+            print(
+                f"  - [{m.role}] {m.name} id={m.id} "
+                f"backend={m.chat_url() or '(local/fallback)'} "
+                f"deploy={m.deployment.to_dict()}"
+            )
+    else:
+        print("Switchyard: OFF (set SWITCHYARD_ENABLED=true or configure models)")
     base = MN_CFG.public_url or f"http://localhost:{MN_CFG.node_port or 8080}"
     print("\nConfigure your IDE with:")
     print(f"  Base URL: {base}/v1")
     print(f"  API Key: {API_KEY}")
-    print(f"  Model: {MODEL_NAME}")
+    if SY_CFG.enabled:
+        print(f"  Model (route): {SY_CFG.route_id}")
+        for m in SY_CFG.selectable_models():
+            print(f"  Model (direct): {m.id}")
+    else:
+        print(f"  Model: {MODEL_NAME}")
     run_flask_app(app, MN_CFG, default_port=8080, debug=not MN_CFG.enabled)
-

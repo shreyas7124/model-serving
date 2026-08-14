@@ -331,9 +331,36 @@ This application runs on port **8081** by default (different from NIM version on
 - ⚠️ Requires NGC account
 
 
+## NeMo Switchyard (multi-model + escalation)
+
+Route IDE traffic across several HF models (local weights and/or remote OpenAI-compatible backends), each with independent deployment parameters (GPUs, `device_map`, dtype, TP, …).
+
+```bash
+# .env
+SWITCHYARD_ENABLED=true
+SWITCHYARD_STRATEGY=escalation
+SWITCHYARD_ROUTE_ID=switchyard/agent
+SWITCHYARD_CONFIG=./switchyard-models.example.json
+```
+
+| IDE model field | Behavior |
+|-----------------|----------|
+| `switchyard/agent` | Escalation route (weak first, latch to strong) |
+| Model id from config | Direct generation on that model |
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" http://localhost:8081/v1/models
+curl -X DELETE -H "Authorization: Bearer $API_KEY" \
+  -H "X-Conversation-ID: my-session" \
+  http://localhost:8081/v1/switchyard/session
+```
+
+Full reference: [`shared/switchyard/README.md`](../shared/switchyard/README.md).
+
 ## Multi-Node Deployment
 
 This app supports horizontal multi-node deployment via `shared.multinode`.
+
 
 ### Quick enable
 

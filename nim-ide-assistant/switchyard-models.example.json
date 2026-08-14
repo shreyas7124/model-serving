@@ -1,0 +1,63 @@
+{
+  "enabled": true,
+  "strategy": "escalation",
+  "route_id": "switchyard/agent",
+  "expose_models": true,
+  "allow_model_select": true,
+  "escalation": {
+    "confirmations": 2,
+    "recent_turn_window": 28,
+    "window_message_chars": 500
+  },
+  "models": [
+    {
+      "name": "weak",
+      "id": "meta/llama-3.1-8b-instruct",
+      "role": "weak",
+      "max_tokens": 8192,
+      "temperature": 0.3,
+      "context_window": 131072,
+      "request_timeout": 300,
+      "deployment": {
+        "backend_url": "http://localhost:8000/v1/chat/completions",
+        "cuda_visible_devices": "0",
+        "gpu_count": 1,
+        "nim_image": "nvcr.io/nim/meta/llama-3.1-8b-instruct:latest",
+        "deploy_mode": "replica"
+      }
+    },
+    {
+      "name": "strong",
+      "id": "meta/llama-3.1-70b-instruct",
+      "role": "strong",
+      "max_tokens": 32768,
+      "temperature": 0.3,
+      "context_window": 131072,
+      "request_timeout": 600,
+      "deployment": {
+        "backend_urls": [
+          "http://localhost:8001/v1/chat/completions"
+        ],
+        "backend_strategy": "round_robin",
+        "tensor_parallel_size": 4,
+        "cuda_visible_devices": "1,2,3,4",
+        "gpu_count": 4,
+        "nim_image": "nvcr.io/nim/meta/llama-3.1-70b-instruct:latest",
+        "deploy_mode": "hybrid"
+      }
+    },
+    {
+      "name": "judge",
+      "id": "meta/llama-3.1-8b-instruct",
+      "role": "judge",
+      "max_tokens": 1024,
+      "temperature": 0.0,
+      "context_window": 32768,
+      "deployment": {
+        "backend_url": "http://localhost:8000/v1/chat/completions",
+        "cuda_visible_devices": "0",
+        "gpu_count": 1
+      }
+    }
+  ]
+}
