@@ -70,7 +70,7 @@ sessions/
 chat_history/
 gh_pat
 
-# Large generated profile audio (regenerate via scripts/generate_profile_data.py)
-**/profile_data/audio/
+# Profile audio TTS cache only (committed WAVs live under profile_data/audio/)
 **/profile_data/.audio_cache/
+
 
