@@ -1,0 +1,62 @@
+# Reference single-replica vLLM + HF IDE assistant.
+# For replica/hybrid multi-instance stacks:
+#   set env from deploy/env.vllm.example
+#   python deploy/scripts/generate_vllm_compose.py --include-apps
+#   docker compose -f deploy/docker-compose.vllm.generated.yml up -d
+#
+# GPU working-set KV stays inside vLLM (--enable-prefix-caching).
+# Optional Mooncake store is hierarchical overflow/cross-replica share (engine-side),
+# not a replacement for vLLM GPU KV. App-level Mooncake response cache is separate.
+
+services:
+  vllm-0:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+      - "--tensor-parallel-size"
+      - "${TENSOR_PARALLEL_SIZE:-1}"
+      - "--max-model-len"
+      - "${VLLM_MAX_MODEL_LEN:-8192}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--enable-prefix-caching"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+    ports:
+      - "${VLLM_PORT:-8000}:8000"
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  hf-ide-assistant:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.python
+    working_dir: /app/hf-ide-assistant
+    command: ["python", "server.py"]
+    environment:
+      LOAD_MODEL_WEIGHTS: "false"
+      MODEL_DEPLOY_MODE: ${MODEL_DEPLOY_MODE:-replica}
+      BACKEND_URLS: http://vllm-0:8000/v1/chat/completions
+      BACKEND_STRATEGY: round_robin
+      HF_MODEL_NAME: ${VLLM_MODEL:-meta-llama/Llama-3.1-8B-Instruct}
+      HOST: 0.0.0.0
+      PORT: "8081"
+      API_KEY: ${API_KEY:-hf-coding-assistant-key}
+    ports:
+      - "8081:8081"
+    depends_on:
+      - vllm-0
+    volumes:
+      - ..:/app

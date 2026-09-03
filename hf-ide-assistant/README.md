@@ -1,21 +1,25 @@
 # HuggingFace IDE Coding Assistant
 
-An OpenAI-compatible API server that connects HuggingFace models to IDEs like Cline and Cursor for coding assistance.
+An OpenAI-compatible API server that fronts **vLLM** (HF model weights) for IDEs like Cline and Cursor.
+This process does **not** load Transformers weights; configure `BACKEND_URLS` / `VLLM_API_URL`.
 
 ## Features
 
 - 🔌 OpenAI-compatible API endpoints
-- 🤗 Powered by HuggingFace Transformers
+- 🚀 Powered by **vLLM** (OpenAI-compatible HTTP)
 - 💻 Works with Cline, Cursor, and other OpenAI-compatible tools
 - 🔑 API key authentication
-- 📝 Local model inference optimized for complicated multi-file coding
-- 🚀 GPU acceleration support
+- 📝 Optimized for complicated multi-file coding (context trim + cache)
+- 🚀 GPU acceleration on the vLLM servers (TP/replica/hybrid)
 - 🧠 1M-token context budget with automatic trim to model capacity
 - ⚡ In-memory response cache + conversation memory (KV cache on generate)
 - 🥮 **Mooncake** L2 cache auto-enabled for Moonshot / Kimi models
 
 
 ## Prerequisites
+
+- **vLLM** OpenAI server(s) reachable via `BACKEND_URLS` or `VLLM_API_URL`
+  (see `deploy/docker-compose.vllm.yml` / `deploy/scripts/generate_vllm_compose.py`)
 
 - Python 3.8+
 - NVIDIA GPU (optional, but recommended for better performance)
@@ -24,7 +28,16 @@ An OpenAI-compatible API server that connects HuggingFace models to IDEs like Cl
 
 ## Setup
 
-### 1. Install Python Dependencies
+### 1. Start vLLM
+
+```bash
+# single replica
+docker compose -f deploy/docker-compose.vllm.yml up -d vllm-0
+# or multi replica/hybrid
+# python deploy/scripts/generate_vllm_compose.py --include-apps && docker compose -f deploy/docker-compose.vllm.generated.yml up -d
+```
+
+### 2. Install Python Dependencies
 
 ```bash
 cd hf-ide-assistant
@@ -33,14 +46,14 @@ pip install -r requirements.txt
 
 **Note**: The first run will download the model, which may take some time.
 
-### 2. Configure Environment
+### 3. Configure Environment
 
 ```bash
 cp .env.example .env
 # Edit .env with your preferred model
 ```
 
-### 3. Run the Server
+### 4. Run the Server
 
 ```bash
 python server.py
@@ -137,10 +150,9 @@ GET /health
 
 Edit `.env` file:
 
-- `HF_MODEL_NAME`: HuggingFace model to use (default: **moonshotai/Kimi-K3**)
-- `HF_TRUST_REMOTE_CODE`: Allow custom model code (default: `true`, needed for Kimi-K3)
-- `HF_TORCH_DTYPE`: Weight dtype — `bfloat16` / `float16` / `float32` / `auto` (default: `bfloat16` on GPU)
-- `HF_DEVICE_MAP`: Accelerate device map (default: `auto` on GPU)
+- `HF_MODEL_NAME` / `VLLM_MODEL`: model id **must match** vLLM `--model` (default: meta-llama/Llama-3.1-8B-Instruct)
+- `BACKEND_URLS` or `VLLM_API_URL`: required vLLM chat completions endpoint(s)
+- `MODEL_DEPLOY_MODE`: `hybrid` | `replica` | `sharded` (placement metadata; GPUs/TP set on vLLM)
 
 - `API_KEY`: API key for authentication (change in production!)
 - `MAX_TOKENS`: Maximum tokens per response (default: **32768**)
@@ -173,7 +185,7 @@ The server also reports an **effective** context window (`effective_context_wind
 The server speeds up repeated and follow-up IDE requests with several layers:
 
 1. **Response cache (L1)** — identical `(model, messages, temperature, max_tokens)` requests return the cached completion instantly (`cached: true` in the JSON body). LRU + TTL eviction.
-2. **Mooncake (L2) — automatic for Moonshot / Kimi models** — when `HF_MODEL_NAME` is a Moonshot model (default `moonshotai/Kimi-K3`), completions are also stored in [Mooncake](https://github.com/kvcache-ai/Mooncake) (`MooncakeDistributedStore`), Kimi’s KVCache-centric store. Survives process restarts when the Mooncake master is running. Falls back to L1-only if Mooncake is not installed or unreachable.
+2. **Mooncake response L2 (optional)** — when the model id looks like Moonshot/Kimi, full **completion JSON** may also be stored in Mooncake as an app-level L2. This is **not** vLLM GPU KV. Engine-side hierarchical KV (GPU working set + Mooncake store on overflow/share) is configured on the **vLLM** deployment.
 3. **Conversation memory** — rolling per-session history (via `X-Conversation-ID` header, or `user` / `conversation_id` body fields). History is trimmed to the effective context while reserving room for `MAX_TOKENS`.
 4. **HF KV cache** — `model.generate(..., use_cache=True)` for faster token-by-token decoding.
 

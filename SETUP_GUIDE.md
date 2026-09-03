@@ -29,8 +29,9 @@ This guide will help you set up and run all 8 model serving applications.
 - NGC API Key (get from https://catalog.ngc.nvidia.com/)
 
 ### For HuggingFace Applications (2, 4, 6, 8)
-- NVIDIA GPU (optional but recommended)
-- CUDA toolkit (if using GPU)
+- **vLLM** server(s) (required; see deploy/docker-compose.vllm.yml)
+- NVIDIA GPU for vLLM hosts
+- HF apps themselves are CPU-friendly API/UI clients
 
 ### For Voice Applications (3, 4)
 - Modern web browser (Chrome or Edge recommended)
@@ -182,7 +183,7 @@ cp .env.example .env
 Common variables:
 - `NIM_API_URL`: URL of NIM API (default: http://localhost:8000/v1/chat/completions)
 - `NIM_MODEL_NAME`: NIM model name (default: meta/llama-3.1-8b-instruct)
-- `HF_MODEL_NAME`: HuggingFace model name (default: microsoft/DialoGPT-medium)
+- `HF_MODEL_NAME / BACKEND_URLS (vLLM)`: HuggingFace model name (default: microsoft/DialoGPT-medium)
 - `API_KEY`: API key for IDE assistants
 - `SECRET_KEY`: Flask secret key for voice applications
 

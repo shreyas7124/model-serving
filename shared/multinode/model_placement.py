@@ -266,6 +266,10 @@ def get_model_placement(
         single = os.getenv("NIM_API_URL", "").strip()
         if single and single not in replicas:
             replicas = replicas or [single]
+        for _vk in ("VLLM_API_URLS", "VLLM_API_URL"):
+            for part in _split_csv(os.getenv(_vk, "")):
+                if part and part not in replicas:
+                    replicas.append(part)
 
     coordinator = os.getenv("MODEL_COORDINATOR_URL", os.getenv("SHARD_COORDINATOR_URL", "")).strip()
 

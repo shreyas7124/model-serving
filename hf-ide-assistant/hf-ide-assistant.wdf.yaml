@@ -8,13 +8,13 @@
 #  - autoscaling is pinned to 1 replica: all apps share a local SQLite store
 #    (shared/database/*.db), which is not safe to run multi-replica as-is.
 #  - secret externalRef.key values are placeholder Vault paths — set real ones.
-#  - Loads the model in-process: schedule on a CUDA GPU node.
+#  - Proxies to vLLM: schedule on a CUDA GPU node.
 apiVersion: wdf.7sg.ai/v2
 kind: WorkloadDefinition
 metadata:
   name: hf-ide-assistant
   version: 1.0.0
-  description: HuggingFace-backed OpenAI-compatible API for IDE coding assistants (Cline/Cursor).
+  description: HuggingFace IDE assistant (OpenAI API). Routes to vLLM backends; Switchyard uses separate vLLM instances per tier.
   tags:
     env: dev
 source:

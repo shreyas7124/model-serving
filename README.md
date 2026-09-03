@@ -5,26 +5,26 @@ This repository contains 8 different applications for locally hosted open-weight
 ## Applications Overview
 
 1. **nim-streamlit-chat** - NIM model with Streamlit chat interface
-2. **hf-streamlit-chat** - HuggingFace model with Streamlit chat interface
+2. **hf-streamlit-chat** - Streamlit chat UI over vLLM (HF model weights served by vLLM)
 3. **nim-webrtc-voice** - NIM model with WebRTC voice interface
-4. **hf-webrtc-voice** - HuggingFace model with WebRTC voice interface
+4. **hf-webrtc-voice** - WebRTC voice UI over vLLM
 5. **nim-streamlit-video** - NIM model with Streamlit video interface (live/pre-recorded)
 6. **hf-streamlit-video** - HuggingFace model with Streamlit video interface (live/pre-recorded)
 7. **nim-ide-assistant** - NIM model for Cline/Cursor coding assistance
-8. **hf-ide-assistant** - HuggingFace model for Cline/Cursor coding assistance
+8. **hf-ide-assistant** - OpenAI-compatible IDE assistant over vLLM (+ Switchyard multi-vLLM)
 
 ## Features
 
 All applications include:
 - Optional user authentication
 - Chat/session history tracking
-- Local model serving
+- Local model serving (NIM containers or vLLM for HF apps)
 - Easy setup and deployment
 
 ## Prerequisites
 
 - Python 3.8+
-- Docker (for NIM models)
+- Docker (for NIM and vLLM model servers)
 - NVIDIA GPU (recommended for better performance)
 - Node.js (for WebRTC applications)
 
@@ -62,6 +62,34 @@ All applications support multi-node / multi-replica deployment through `shared/m
 - **Reference stack**: `deploy/docker-compose.multinode.yml` + `deploy/nginx.multinode.conf`
 - **Env template**: `deploy/env.multinode.example`
 - **Docs**: [`shared/multinode/README.md`](shared/multinode/README.md)
+- **HF / vLLM stack**: `deploy/docker-compose.vllm.yml`, `deploy/env.vllm.example`,
+  `deploy/scripts/generate_vllm_compose.py` (replica/hybrid multi-instance)
+
+## Auto-deploy model containers
+
+NIM and HF apps can **start their model servers via Docker Compose** on startup:
+
+- `AUTO_DEPLOY_MODEL=true` (default) — deploy if backends are not already healthy
+- `AUTO_DEPLOY_TEARDOWN_ON_EXIT=true` (default) — stop **owned** containers when the app exits
+- Engine: NIM apps → NIM images; HF apps → vLLM
+- Placement: `MODEL_DEPLOY_MODE`, `NIM_REPLICA_COUNT` / `VLLM_REPLICA_COUNT`, `TENSOR_PARALLEL_SIZE`, `GPU_DEVICES`
+- CLI: `python -m shared.deploy up|down|status|generate --engine nim|vllm`
+- Pre-existing healthy `BACKEND_URLS` are used as-is and are **not** torn down on exit
+- Set `AUTO_DEPLOY_MODEL=false` in production/K8s when an orchestrator owns GPUs
+- **Multi physical GPU nodes**: set `DEPLOY_NODES=local,user@gpu1,user@gpu2` with passwordless SSH;
+  control node inventories GPUs, packs replicas, `scp` + `docker compose up` on each host.
+  See `deploy/env.multinode-ssh.example`. Cross-node TP is not auto-deployed (use coordinator URL).
+
+## HF apps and vLLM
+
+All **hf-*** applications are **vLLM-only** clients (no in-process Transformers/torch weights).
+Set `BACKEND_URLS` or `VLLM_API_URL` to one or more OpenAI-compatible vLLM servers.
+`MODEL_DEPLOY_MODE=replica|hybrid|sharded` plus `VLLM_REPLICA_COUNT` / `TENSOR_PARALLEL_SIZE`
+drive how many vLLM containers the generator creates.
+
+GPU **working-set** KV stays inside vLLM (prefix cache). Optional **Mooncake** on the vLLM
+stack is hierarchical overflow / cross-replica share — not a replacement for GPU KV.
+The IDE may still use Mooncake as an **app-level response** L2 cache for Moonshot/Kimi ids.
 
 ## NeMo Switchyard (IDE assistants)
 

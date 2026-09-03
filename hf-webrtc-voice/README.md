@@ -1,6 +1,7 @@
+<!-- HF apps are vLLM-only: set BACKEND_URLS or VLLM_API_URL; no local Transformers. -->
 # HuggingFace WebRTC Voice Interface
 
-A voice-enabled chat interface powered by HuggingFace Transformers with WebRTC, speech recognition, and text-to-speech capabilities.
+A voice-enabled chat interface powered by vLLM (OpenAI-compatible) with WebRTC, speech recognition, and text-to-speech capabilities.
 
 ## Features
 
@@ -10,7 +11,7 @@ A voice-enabled chat interface powered by HuggingFace Transformers with WebRTC, 
 - 🔐 Optional user authentication
 - 📝 Conversation history (for logged-in users)
 - 🌐 Real-time communication with Socket.IO
-- 🤗 Local HuggingFace model inference
+- 🤗 Remote vLLM inference
 
 ## Prerequisites
 
@@ -83,14 +84,14 @@ You can also type messages in the text input field as an alternative to voice.
 
 Edit `.env` file:
 
-- `HF_MODEL_NAME`: HuggingFace model to use (default: microsoft/DialoGPT-medium)
+- `HF_MODEL_NAME`: HuggingFace model to use (default: meta-llama/Llama-3.1-8B-Instruct)
 - `SECRET_KEY`: Flask secret key for sessions
 
 ### Recommended Models
 
 **Small Models (CPU-friendly):**
 - `microsoft/DialoGPT-small` - 117M parameters
-- `microsoft/DialoGPT-medium` - 345M parameters (default)
+- `meta-llama/Llama-3.1-8B-Instruct` - 345M parameters (default)
 - `facebook/blenderbot-400M-distill` - 400M parameters
 
 **Larger Models (GPU recommended):**
@@ -126,7 +127,7 @@ Edit `.env` file:
 If the model fails to load:
 ```bash
 # Pre-download the model
-python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('microsoft/DialoGPT-medium')"
+python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.1-8B-Instruct')"
 ```
 
 ### Out of Memory Errors

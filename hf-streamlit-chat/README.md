@@ -1,10 +1,11 @@
+<!-- HF apps are vLLM-only: set BACKEND_URLS or VLLM_API_URL; no local Transformers. -->
 # HuggingFace Streamlit Chat Interface
 
-A chat interface powered by HuggingFace Transformers with optional authentication and conversation history.
+A chat interface powered by vLLM (OpenAI-compatible) with optional authentication and conversation history.
 
 ## Features
 
-- 🤗 Local HuggingFace model inference
+- 🤗 Remote vLLM inference
 - 🔐 Optional user authentication
 - 📝 Conversation history (for logged-in users)
 - 🔄 Multiple conversation management
@@ -62,13 +63,13 @@ The application will open in your browser at `http://localhost:8501`
 
 Edit `.env` file:
 
-- `HF_MODEL_NAME`: HuggingFace model to use (default: microsoft/DialoGPT-medium)
+- `HF_MODEL_NAME`: HuggingFace model to use (default: meta-llama/Llama-3.1-8B-Instruct)
 
 ### Recommended Models
 
 **Small Models (CPU-friendly):**
 - `microsoft/DialoGPT-small` - 117M parameters
-- `microsoft/DialoGPT-medium` - 345M parameters (default)
+- `meta-llama/Llama-3.1-8B-Instruct` - 345M parameters (default)
 - `facebook/blenderbot-400M-distill` - 400M parameters
 
 **Larger Models (GPU recommended):**
@@ -122,7 +123,7 @@ If you encounter OOM errors:
 If model download fails:
 ```bash
 # Pre-download the model
-python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('microsoft/DialoGPT-medium')"
+python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.1-8B-Instruct')"
 ```
 
 ## Model Storage

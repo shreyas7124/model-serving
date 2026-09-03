@@ -23,11 +23,13 @@ from shared.auth import AuthManager
 from shared.database import ChatHistory
 from shared.cache import ResponseCache, ConversationMemory
 from shared.multinode import (
+    BackendPool,
     ClusterInfo,
     apply_flask_multinode,
     get_multinode_config,
     run_flask_app,
 )
+from shared.deploy import ensure_model_runtime
 from shared.switchyard import (
     get_switchyard_config,
     get_switchyard_router,
@@ -46,11 +48,22 @@ CLUSTER = ClusterInfo(MN_CFG, app_name="nim-ide-assistant")
 NIM_API_URL = os.getenv("NIM_API_URL", "http://localhost:8000/v1/chat/completions")
 MODEL_NAME = os.getenv("NIM_MODEL_NAME", "meta/llama-3.1-8b-instruct")
 API_KEY = os.getenv("API_KEY", "nim-coding-assistant-key")
-# Seed backend pool with default single URL when BACKEND_URLS unset
-if not CLUSTER.backend_pool.urls:
-    CLUSTER.backend_pool = type(CLUSTER.backend_pool)(
-        [NIM_API_URL], strategy=MN_CFG.backend_strategy
-    )
+_RUNTIME = ensure_model_runtime(
+    "nim",
+    app_name="nim-ide-assistant",
+    model_id=MODEL_NAME,
+    deploy_mode=MN_CFG.model_deploy_mode,
+    replica_count=int(os.getenv("NIM_REPLICA_COUNT", os.getenv("VLLM_REPLICA_COUNT", "1")) or "1"),
+    tensor_parallel_size=MN_CFG.tensor_parallel_size,
+    existing_urls=MN_CFG.backend_urls or ([NIM_API_URL] if NIM_API_URL else []),
+)
+NIM_API_URL = _RUNTIME.urls[0] if _RUNTIME.urls else NIM_API_URL
+CLUSTER.backend_pool = BackendPool(_RUNTIME.urls or [NIM_API_URL], strategy=MN_CFG.backend_strategy)
+MN_CFG.backend_urls = list(CLUSTER.backend_pool.urls)
+print(
+    f"Model runtime: engine=nim owned={_RUNTIME.owned} "
+    f"teardown_on_exit={_RUNTIME.teardown_on_exit} project={_RUNTIME.project}"
+)
 
 
 # Model Parameters — defaults tuned for complicated coding use cases

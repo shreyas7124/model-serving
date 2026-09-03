@@ -55,7 +55,8 @@ HF_MAX_MEMORY_PER_GPU=20GiB
 HF_TORCH_DTYPE=bfloat16
 ```
 
-Used by **hf-ide-assistant** / **hf-streamlit-chat** / **hf-webrtc-voice** when loading Transformers weights.
+HF apps are **vLLM-only** clients: set these on the **vLLM containers**, not the Streamlit/Flask processes.
+Apps use `BACKEND_URLS` / `VLLM_API_URL` and never load Transformers weights.
 
 ### Inter-node (pipeline / multi-host TP)
 
@@ -232,3 +233,11 @@ See also `deploy/env.multinode.example`.
 - `get_model_placement()` — replica vs sharded details + HF `from_pretrained` kwargs
 - `ClusterInfo.next_backend()` — coordinator → replica pool → shard gateway
 - `ClusterInfo.health()` — full topology for ops
+
+
+## HF apps (vLLM-only)
+
+- Require `BACKEND_URLS`, `VLLM_API_URL`, or `MODEL_COORDINATOR_URL`
+- `LOAD_MODEL_WEIGHTS=false` (defaulted in app code)
+- Multi-replica: `python deploy/scripts/generate_vllm_compose.py`
+- Switchyard (hf-ide-assistant): each tier points at its own vLLM `backend_urls`

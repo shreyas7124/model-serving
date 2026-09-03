@@ -1,9 +1,6 @@
 flask>=3.0.0
 flask-cors>=4.0.0
-transformers>=4.35.0
-torch>=2.0.0
-accelerate>=0.24.0
-# Mooncake KV cache store (used automatically for Moonshot/Kimi models)
-# CUDA builds: mooncake-transfer-engine  |  non-CUDA: mooncake-transfer-engine-non-cuda
+requests>=2.31.0
+# Optional L2 response cache for Moonshot/Kimi model ids (app-level, not engine KV)
 mooncake-transfer-engine>=0.3.0; platform_system != "Darwin"
 waitress>=3.0.0

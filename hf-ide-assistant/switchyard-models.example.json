@@ -12,50 +12,50 @@
   "models": [
     {
       "name": "weak",
-      "id": "mistralai/Mistral-7B-Instruct-v0.1",
+      "id": "meta-llama/Llama-3.1-8B-Instruct",
       "role": "weak",
       "max_tokens": 4096,
       "temperature": 0.3,
       "context_window": 8192,
       "deployment": {
-        "load_weights_locally": true,
-        "cuda_visible_devices": "0",
-        "device_map": "auto",
-        "torch_dtype": "bfloat16",
-        "gpu_count": 1,
-        "deploy_mode": "replica"
+        "load_weights_locally": false,
+        "deploy_mode": "replica",
+        "backend_urls": ["http://vllm-weak:8000/v1/chat/completions"],
+        "tensor_parallel_size": 1,
+        "gpu_count": 1
       }
     },
     {
       "name": "strong",
-      "id": "moonshotai/Kimi-K3",
+      "id": "meta-llama/Llama-3.1-70B-Instruct",
       "role": "strong",
       "max_tokens": 32768,
       "temperature": 0.3,
-      "context_window": 1048576,
+      "context_window": 131072,
       "deployment": {
-        "load_weights_locally": true,
-        "cuda_visible_devices": "1,2,3,4,5,6,7",
-        "device_map": "auto",
-        "torch_dtype": "bfloat16",
-        "tensor_parallel_size": 8,
-        "max_memory_per_gpu": "20GiB",
-        "trust_remote_code": true,
-        "gpu_count": 7,
-        "deploy_mode": "sharded"
+        "load_weights_locally": false,
+        "deploy_mode": "hybrid",
+        "backend_urls": [
+          "http://vllm-strong-0:8000/v1/chat/completions",
+          "http://vllm-strong-1:8000/v1/chat/completions"
+        ],
+        "backend_strategy": "round_robin",
+        "tensor_parallel_size": 4,
+        "gpu_count": 4
       }
     },
     {
       "name": "judge",
-      "id": "mistralai/Mistral-7B-Instruct-v0.1",
+      "id": "meta-llama/Llama-3.1-8B-Instruct",
       "role": "judge",
       "max_tokens": 1024,
       "temperature": 0.0,
       "deployment": {
-        "load_weights_locally": true,
-        "cuda_visible_devices": "0",
-        "device_map": "auto",
-        "torch_dtype": "bfloat16"
+        "load_weights_locally": false,
+        "deploy_mode": "replica",
+        "backend_urls": ["http://vllm-weak:8000/v1/chat/completions"],
+        "tensor_parallel_size": 1,
+        "gpu_count": 1
       }
     }
   ]

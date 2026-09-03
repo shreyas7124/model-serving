@@ -73,4 +73,10 @@ gh_pat
 # Profile audio TTS cache only (committed WAVs live under profile_data/audio/)
 **/profile_data/.audio_cache/
 
+# Auto-generated model runtime compose (shared.deploy / tests)
+deploy/docker-compose.*.generated.yml
+deploy/*.generated.env
+**/docker-compose.*.generated.yml
 
+# Cline / local agent config
+.cline/

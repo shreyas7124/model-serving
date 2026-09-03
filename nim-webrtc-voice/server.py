@@ -22,6 +22,7 @@ from shared.multinode import (
     get_multinode_config,
     run_socketio_app,
 )
+from shared.deploy import ensure_model_runtime
 from shared.tools import get_web_access_tool
 
 
@@ -43,8 +44,18 @@ socketio = SocketIO(app, **_socketio_kwargs)
 # Configuration
 NIM_API_URL = os.getenv("NIM_API_URL", "http://localhost:8000/v1/chat/completions")
 MODEL_NAME = os.getenv("NIM_MODEL_NAME", "meta/llama-3.1-8b-instruct")
-if not CLUSTER.backend_pool.urls:
-    CLUSTER.backend_pool = BackendPool([NIM_API_URL], strategy=MN_CFG.backend_strategy)
+_RUNTIME = ensure_model_runtime(
+    "nim",
+    app_name="nim-webrtc-voice",
+    model_id=MODEL_NAME,
+    deploy_mode=MN_CFG.model_deploy_mode,
+    replica_count=int(os.getenv("NIM_REPLICA_COUNT", os.getenv("VLLM_REPLICA_COUNT", "1")) or "1"),
+    tensor_parallel_size=MN_CFG.tensor_parallel_size,
+    existing_urls=MN_CFG.backend_urls or ([NIM_API_URL] if NIM_API_URL else []),
+)
+NIM_API_URL = _RUNTIME.urls[0] if _RUNTIME.urls else NIM_API_URL
+CLUSTER.backend_pool = BackendPool(_RUNTIME.urls or [NIM_API_URL], strategy=MN_CFG.backend_strategy)
+MN_CFG.backend_urls = list(CLUSTER.backend_pool.urls)
 
 # Initialize managers
 auth_manager = AuthManager()

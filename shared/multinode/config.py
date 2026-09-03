@@ -169,6 +169,15 @@ def get_multinode_config(
     single = os.getenv("NIM_API_URL", "").strip()
     if single and single not in backend_urls:
         backend_urls = backend_urls or [single]
+    # vLLM URL aliases used by HF apps
+    for _vllm_key in ("VLLM_API_URLS", "VLLM_API_URL"):
+        _raw = os.getenv(_vllm_key, "").strip()
+        if not _raw:
+            continue
+        for _part in _raw.split(","):
+            _p = _part.strip()
+            if _p and _p not in backend_urls:
+                backend_urls.append(_p)
 
     port = _env_int("PORT", _env_int("NODE_PORT", default_port or 0))
     host = os.getenv("HOST", os.getenv("NODE_HOST", "0.0.0.0"))
