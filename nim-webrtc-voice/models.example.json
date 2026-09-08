@@ -1,0 +1,41 @@
+{
+  "enabled": true,
+  "strategy": "passthrough",
+  "expose_models": true,
+  "allow_model_select": true,
+  "models": [
+    {
+      "name": "8b",
+      "id": "meta/llama-3.1-8b-instruct",
+      "role": "general",
+      "max_tokens": 4096,
+      "temperature": 0.7,
+      "deployment": {
+        "backend_urls": [
+          "http://127.0.0.1:8000/v1/chat/completions"
+        ],
+        "cuda_visible_devices": "0",
+        "gpu_count": 1,
+        "nim_image": "nvcr.io/nim/meta/llama-3.1-8b-instruct:latest",
+        "deploy_mode": "replica"
+      }
+    },
+    {
+      "name": "70b",
+      "id": "meta/llama-3.1-70b-instruct",
+      "role": "general",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "deployment": {
+        "backend_urls": [
+          "http://127.0.0.1:8001/v1/chat/completions"
+        ],
+        "cuda_visible_devices": "1,2,3,4",
+        "tensor_parallel_size": 4,
+        "gpu_count": 4,
+        "nim_image": "nvcr.io/nim/meta/llama-3.1-70b-instruct:latest",
+        "deploy_mode": "hybrid"
+      }
+    }
+  ]
+}

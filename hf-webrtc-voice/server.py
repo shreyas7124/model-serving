@@ -1,6 +1,6 @@
 """
 HuggingFace Model with WebRTC Voice Interface - Backend Server (vLLM backend)
-Supports optional login and chat history.
+Supports optional login, chat history, and multi-model selection.
 """
 from flask import Flask, request, jsonify, session
 from flask_cors import CORS
@@ -13,8 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.auth import AuthManager
 from shared.database import ChatHistory
-from shared.backends import OpenAIChatClient, require_backend_urls
-from shared.deploy import ensure_model_runtime
+from shared.backends import require_backend_urls
 from shared.multinode import (
     BackendPool,
     ClusterInfo,
@@ -23,6 +22,7 @@ from shared.multinode import (
     run_socketio_app,
 )
 from shared.tools import get_web_access_tool
+from shared.model_catalog import deploy_app_models, load_app_models
 
 os.environ.setdefault("LOAD_MODEL_WEIGHTS", "false")
 
@@ -39,44 +39,39 @@ if MN_CFG.use_redis and MN_CFG.redis_url:
     _socketio_kwargs["message_queue"] = MN_CFG.redis_url
 socketio = SocketIO(app, **_socketio_kwargs)
 
-MODEL_NAME = os.getenv(
+DEFAULT_MODEL_NAME = os.getenv(
     "HF_MODEL_NAME", os.getenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 )
 DEFAULT_TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 DEFAULT_MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-REQUEST_TIMEOUT = float(os.getenv("VLLM_TIMEOUT", "300"))
 
-_RUNTIME = ensure_model_runtime(
-    "vllm",
-    app_name="hf-webrtc-voice",
-    model_id=MODEL_NAME,
-    deploy_mode=MN_CFG.model_deploy_mode,
-    replica_count=int(os.getenv("VLLM_REPLICA_COUNT", "1") or "1"),
-    tensor_parallel_size=MN_CFG.tensor_parallel_size,
-    existing_urls=MN_CFG.backend_urls or CLUSTER.backend_pool.urls,
-    api_key=VLLM_API_KEY,
+default_backend = MN_CFG.backend_urls[0] if MN_CFG.backend_urls else ""
+SY_CFG = load_app_models(
+    default_model_id=DEFAULT_MODEL_NAME,
+    default_backend_url=default_backend,
+    owned_by="hf-webrtc-voice",
+    reload=True,
 )
-backends = require_backend_urls(_RUNTIME.urls or MN_CFG.backend_urls or CLUSTER.backend_pool.urls)
+CATALOG, _HANDLES = deploy_app_models(
+    "vllm",
+    SY_CFG,
+    app_name="hf-webrtc-voice",
+    api_key=VLLM_API_KEY,
+    default_backend_urls=MN_CFG.backend_urls or CLUSTER.backend_pool.urls,
+)
+backends = require_backend_urls(
+    CATALOG.all_backend_urls() or MN_CFG.backend_urls or CLUSTER.backend_pool.urls
+)
 CLUSTER.backend_pool = BackendPool(backends, strategy=MN_CFG.backend_strategy)
 MN_CFG.backend_urls = backends
-
-VLLM_CLIENT = OpenAIChatClient(
-    next_url=CLUSTER.next_backend,
-    model=MODEL_NAME,
-    api_key=VLLM_API_KEY,
-    timeout=REQUEST_TIMEOUT,
-    mark_success=CLUSTER.backend_pool.mark_success,
-    mark_failure=CLUSTER.backend_pool.mark_failure,
-    default_temperature=DEFAULT_TEMPERATURE,
-    default_max_tokens=DEFAULT_MAX_TOKENS,
-)
+MODEL_NAME = CATALOG.default_id()
 
 auth_manager = AuthManager()
 chat_history = ChatHistory()
 WEB = get_web_access_tool("hf-webrtc-voice")
 
-print(f"vLLM voice backends: {CLUSTER.backend_pool.all()}")
+print(f"vLLM voice models: {[m.id for m in CATALOG.models]} backends={backends}")
 print("Model loaded via remote vLLM (no local weights).")
 
 conversations = {}
@@ -118,19 +113,24 @@ def login():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
-    session_token = session.get("session_token")
-    if session_token:
-        auth_manager.logout(session_token)
+    token = session.get("session_token")
+    if token:
+        auth_manager.logout(token)
     session.clear()
-    return jsonify({"message": "Logout successful"}), 200
+    return jsonify({"message": "Logged out"}), 200
 
 
 @app.route("/api/auth/guest", methods=["POST"])
-def guest_login():
-    session["user_id"] = None
+def guest():
     session["username"] = "Guest"
-    session.permanent = False
-    return jsonify({"message": "Guest session created", "username": "Guest"}), 200
+    session["user_id"] = None
+    session.permanent = True
+    return jsonify({"message": "Guest session", "username": "Guest"}), 200
+
+
+@app.route("/api/models", methods=["GET"])
+def list_models():
+    return jsonify(CATALOG.list_payload()), 200
 
 
 @app.route("/api/conversations", methods=["GET"])
@@ -159,11 +159,12 @@ def health():
             inference_backend="vllm",
             loads_weights_locally=False,
             web_access=WEB.stats(),
+            catalog=CATALOG.health_block(),
         )
     ), 200
 
 
-def generate_response(prompt, prior_messages, web_context: str = ""):
+def generate_response(prompt, prior_messages, web_context: str = "", model_id: str = ""):
     messages = []
     for msg in prior_messages or []:
         role = msg.get("role")
@@ -178,7 +179,12 @@ def generate_response(prompt, prior_messages, web_context: str = ""):
         )
     messages.append({"role": "user", "content": model_prompt})
     try:
-        _data, text = VLLM_CLIENT.chat(messages)
+        text, _data = CATALOG.chat(
+            messages,
+            model=model_id or MODEL_NAME,
+            temperature=DEFAULT_TEMPERATURE,
+            max_tokens=DEFAULT_MAX_TOKENS,
+        )
         return text or "(empty response)"
     except Exception as e:
         return f"Error: {e}"
@@ -199,26 +205,40 @@ def handle_disconnect():
 
 @socketio.on("start_conversation")
 def handle_start_conversation(data):
+    data = data or {}
     user_id = session.get("user_id")
     if user_id:
         conv_id = chat_history.create_conversation(user_id, "hf-webrtc-voice")
     else:
         conv_id = None
-    conversations[request.sid] = {"id": conv_id, "messages": []}
-    emit("conversation_started", {"conversation_id": conv_id})
+    model_id = data.get("model") or CATALOG.default_id()
+    conversations[request.sid] = {
+        "id": conv_id,
+        "messages": [],
+        "model": model_id,
+    }
+    emit(
+        "conversation_started",
+        {"conversation_id": conv_id, "model": model_id},
+    )
 
 
 @socketio.on("voice_message")
 def handle_voice_message(data):
-    text = (data or {}).get("text", "")
+    data = data or {}
+    text = data.get("text", "")
     if not text:
         emit("error", {"message": "No text provided"})
         return
 
     if request.sid not in conversations:
-        handle_start_conversation({})
+        handle_start_conversation(data)
 
     conv = conversations[request.sid]
+    if data.get("model"):
+        conv["model"] = data["model"]
+    model_id = conv.get("model") or CATALOG.default_id()
+
     prior = list(conv["messages"])
     conv["messages"].append({"role": "user", "content": text})
 
@@ -248,13 +268,15 @@ def handle_voice_message(data):
             },
         )
 
-    response = generate_response(text, prior, web_context=web_context)
+    response = generate_response(
+        text, prior, web_context=web_context, model_id=model_id
+    )
     conv["messages"].append({"role": "assistant", "content": response})
 
     if conv["id"]:
         chat_history.add_message(conv["id"], "assistant", response)
 
-    emit("ai_response", {"text": response})
+    emit("ai_response", {"text": response, "model": model_id})
 
 
 @socketio.on("text_message")

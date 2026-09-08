@@ -4,6 +4,7 @@ let mediaRecorder;
 let audioChunks = [];
 let isRecording = false;
 let recognition;
+let selectedModel = null;
 
 // Initialize Speech Recognition
 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -16,7 +17,7 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
     recognition.onresult = (event) => {
         const transcript = event.results[0][0].transcript;
         addMessage('user', transcript);
-        socket.emit('voice_message', { text: transcript });
+        socket.emit('voice_message', { text: transcript, model: getSelectedModel() });
     };
     
     recognition.onerror = (event) => {
@@ -30,6 +31,41 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             recognition.start(); // Restart if still recording
         }
     };
+}
+
+
+function getSelectedModel() {
+    const sel = document.getElementById('model-select');
+    if (sel && sel.value) return sel.value;
+    return selectedModel;
+}
+
+async function loadModels() {
+    const sel = document.getElementById('model-select');
+    if (!sel) return;
+    try {
+        const response = await fetch('/api/models', { credentials: 'include' });
+        const data = await response.json();
+        sel.innerHTML = '';
+        const items = (data && data.data) || [];
+        const def = (data && data.default) || (items[0] && items[0].id) || '';
+        items.forEach((m) => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.label || m.id;
+            if (m.id === def) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        selectedModel = sel.value || def;
+        sel.onchange = () => {
+            selectedModel = sel.value;
+            if (socket && socket.connected) {
+                socket.emit('start_conversation', { model: selectedModel });
+            }
+        };
+    } catch (e) {
+        console.error('Failed to load models', e);
+    }
 }
 
 // Tab switching
@@ -150,11 +186,11 @@ function showMessage(message, type) {
     msgDiv.className = type;
 }
 
-function showChatInterface(username) {
+async function showChatInterface(username) {
     document.getElementById('auth-container').style.display = 'none';
     document.getElementById('chat-container').style.display = 'flex';
     document.getElementById('username-display').textContent = username;
-    
+    await loadModels();
     initializeSocket();
 }
 
@@ -166,7 +202,7 @@ function initializeSocket() {
     
     socket.on('connect', () => {
         console.log('Connected to server');
-        socket.emit('start_conversation', {});
+        socket.emit('start_conversation', { model: getSelectedModel() });
         addMessage('system', 'Connected! Start speaking or typing.');
     });
     
@@ -201,7 +237,7 @@ function sendTextMessage() {
     
     if (text && socket) {
         addMessage('user', text);
-        socket.emit('text_message', { text });
+        socket.emit('text_message', { text, model: getSelectedModel() });
         input.value = '';
     }
 }

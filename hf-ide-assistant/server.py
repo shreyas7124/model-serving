@@ -28,7 +28,7 @@ from shared.backends import (
     normalize_chat_url,
     require_backend_urls,
 )
-from shared.deploy import ensure_model_runtime
+from shared.deploy import ensure_models_runtime
 from shared.multinode import (
     BackendPool,
     ClusterInfo,
@@ -100,27 +100,78 @@ USING_MOONSHOT = is_moonshot_model(MODEL_NAME)
 
 PLACEMENT = get_model_placement(replica_backends=MN_CFG.backend_urls)
 
-# Auto-deploy vLLM containers when needed; tear down on exit if we own them
-_RUNTIME = ensure_model_runtime(
+def _force_remote_switchyard_models(cfg) -> None:
+    """HF path: every Switchyard tier must use remote vLLM URLs."""
+    if not cfg.models:
+        return
+    default_urls = list(CLUSTER.backend_pool.urls) if CLUSTER.backend_pool.urls else []
+    for m in cfg.models:
+        m.deployment.load_weights_locally = False
+        if not m.deployment.backend_urls and not m.deployment.coordinator_url:
+            if default_urls and len(cfg.models) == 1:
+                m.deployment.backend_urls = list(default_urls)
+        if m.deployment.backend_urls:
+            m.deployment.backend_urls = [
+                normalize_chat_url(u) for u in m.deployment.backend_urls if u
+            ]
+
+
+# Load Switchyard multi-model config first, then deploy all tiers in parallel.
+SY_CFG = get_switchyard_config(
+    default_model_id=MODEL_NAME,
+    default_backend_url=(
+        (MN_CFG.backend_urls[0] if MN_CFG.backend_urls else "")
+        or (PLACEMENT.replica_backends[0] if PLACEMENT.replica_backends else "")
+    ),
+    owned_by="hf-switchyard",
+    reload=True,
+)
+_force_remote_switchyard_models(SY_CFG)
+
+_deploy_specs = list(SY_CFG.models) if SY_CFG.models else []
+if not _deploy_specs:
+    from shared.switchyard.config import DeploymentParams, ModelSpec
+
+    _dep = DeploymentParams()
+    _seed = list(MN_CFG.backend_urls or PLACEMENT.replica_backends or [])
+    if _seed:
+        _dep.backend_urls = _seed
+    _deploy_specs = [
+        ModelSpec(name="default", id=MODEL_NAME, role="weak", deployment=_dep)
+    ]
+
+_HANDLES = ensure_models_runtime(
     "vllm",
+    _deploy_specs,
     app_name="hf-ide-assistant",
-    model_id=MODEL_NAME,
-    deploy_mode=MN_CFG.model_deploy_mode,
-    replica_count=int(__import__("os").getenv("VLLM_REPLICA_COUNT", "1") or "1"),
-    tensor_parallel_size=MN_CFG.tensor_parallel_size,
-    existing_urls=MN_CFG.backend_urls or PLACEMENT.replica_backends,
     api_key=VLLM_API_KEY,
+    default_backend_urls=MN_CFG.backend_urls or PLACEMENT.replica_backends,
 )
-PLACEMENT.replica_backends = list(
-    require_backend_urls(_RUNTIME.urls or MN_CFG.backend_urls or PLACEMENT.replica_backends)
-)
+if SY_CFG.models:
+    SY_CFG.models = list(_deploy_specs)
+_force_remote_switchyard_models(SY_CFG)
+
+_all_urls = []
+for _h in _HANDLES:
+    _all_urls.extend(_h.urls or [])
+for _m in _deploy_specs:
+    _all_urls.extend(list(_m.deployment.backend_urls or []))
+_seen = set()
+_uniq = []
+for u in _all_urls:
+    nu = normalize_chat_url(u) if u else ""
+    if nu and nu not in _seen:
+        _seen.add(nu)
+        _uniq.append(nu)
+PLACEMENT.replica_backends = list(require_backend_urls(_uniq or MN_CFG.backend_urls or PLACEMENT.replica_backends))
 CLUSTER.backend_pool = BackendPool(
     PLACEMENT.replica_backends, strategy=MN_CFG.backend_strategy
 )
 MN_CFG.backend_urls = list(CLUSTER.backend_pool.urls)
 print(
-    f"Model runtime: engine=vllm owned={_RUNTIME.owned} "
-    f"teardown_on_exit={_RUNTIME.teardown_on_exit} project={_RUNTIME.project}"
+    f"Model runtime: engine=vllm stacks={len(_HANDLES)} "
+    f"models={[getattr(m, 'id', m) for m in _deploy_specs]} "
+    f"backends={CLUSTER.backend_pool.all()}"
 )
 
 VLLM_CLIENT = OpenAIChatClient(
@@ -136,32 +187,6 @@ VLLM_CLIENT = OpenAIChatClient(
 
 print("vLLM backends:", CLUSTER.backend_pool.all())
 print("Placement:", describe_placement_for_logs(PLACEMENT))
-
-def _force_remote_switchyard_models(cfg) -> None:
-    """HF path: every Switchyard tier must use remote vLLM URLs."""
-    if not cfg.enabled:
-        return
-    default_urls = list(CLUSTER.backend_pool.urls)
-    for m in cfg.models:
-        m.deployment.load_weights_locally = False
-        if not m.deployment.backend_urls and not m.deployment.coordinator_url:
-            if default_urls:
-                m.deployment.backend_urls = list(default_urls)
-        if m.deployment.backend_urls:
-            m.deployment.backend_urls = [
-                normalize_chat_url(u) for u in m.deployment.backend_urls if u
-            ]
-
-
-SY_CFG = get_switchyard_config(
-    default_model_id=MODEL_NAME,
-    default_backend_url=(
-        CLUSTER.backend_pool.urls[0] if CLUSTER.backend_pool.urls else ""
-    ),
-    owned_by="hf-switchyard",
-    reload=True,
-)
-_force_remote_switchyard_models(SY_CFG)
 
 if SY_CFG.enabled:
     missing = [

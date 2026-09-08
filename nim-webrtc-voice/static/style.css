@@ -276,3 +276,28 @@ button:active {
     background: #d1ecf1;
     color: #0c5460;
 }
+
+.model-picker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #666;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.model-picker select {
+    padding: 8px 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    font-size: 13px;
+    background: white;
+    color: #333;
+    max-width: 260px;
+    cursor: pointer;
+}
+
+.model-picker select:focus {
+    outline: none;
+    border-color: #667eea;
+}

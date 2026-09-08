@@ -29,7 +29,7 @@ from shared.multinode import (
     get_multinode_config,
     run_flask_app,
 )
-from shared.deploy import ensure_model_runtime
+from shared.deploy import ensure_models_runtime
 from shared.switchyard import (
     get_switchyard_config,
     get_switchyard_router,
@@ -48,22 +48,7 @@ CLUSTER = ClusterInfo(MN_CFG, app_name="nim-ide-assistant")
 NIM_API_URL = os.getenv("NIM_API_URL", "http://localhost:8000/v1/chat/completions")
 MODEL_NAME = os.getenv("NIM_MODEL_NAME", "meta/llama-3.1-8b-instruct")
 API_KEY = os.getenv("API_KEY", "nim-coding-assistant-key")
-_RUNTIME = ensure_model_runtime(
-    "nim",
-    app_name="nim-ide-assistant",
-    model_id=MODEL_NAME,
-    deploy_mode=MN_CFG.model_deploy_mode,
-    replica_count=int(os.getenv("NIM_REPLICA_COUNT", os.getenv("VLLM_REPLICA_COUNT", "1")) or "1"),
-    tensor_parallel_size=MN_CFG.tensor_parallel_size,
-    existing_urls=MN_CFG.backend_urls or ([NIM_API_URL] if NIM_API_URL else []),
-)
-NIM_API_URL = _RUNTIME.urls[0] if _RUNTIME.urls else NIM_API_URL
-CLUSTER.backend_pool = BackendPool(_RUNTIME.urls or [NIM_API_URL], strategy=MN_CFG.backend_strategy)
-MN_CFG.backend_urls = list(CLUSTER.backend_pool.urls)
-print(
-    f"Model runtime: engine=nim owned={_RUNTIME.owned} "
-    f"teardown_on_exit={_RUNTIME.teardown_on_exit} project={_RUNTIME.project}"
-)
+# Multi-model deploy happens after Switchyard config is loaded (see below).
 
 
 # Model Parameters — defaults tuned for complicated coding use cases
@@ -106,6 +91,51 @@ SY_CFG = get_switchyard_config(
     default_backend_url=NIM_API_URL,
     owned_by="nim-switchyard",
     reload=True,
+)
+# Deploy every Switchyard tier (and default model) in parallel when needed.
+_deploy_specs = list(SY_CFG.models) if SY_CFG.models else []
+if not _deploy_specs:
+    from shared.switchyard.config import DeploymentParams, ModelSpec
+
+    _dep = DeploymentParams()
+    if MN_CFG.backend_urls:
+        _dep.backend_urls = list(MN_CFG.backend_urls)
+    elif NIM_API_URL:
+        _dep.backend_urls = [NIM_API_URL]
+    _deploy_specs = [
+        ModelSpec(name="default", id=MODEL_NAME, role="weak", deployment=_dep)
+    ]
+_HANDLES = ensure_models_runtime(
+    "nim",
+    _deploy_specs,
+    app_name="nim-ide-assistant",
+    default_backend_urls=MN_CFG.backend_urls or ([NIM_API_URL] if NIM_API_URL else []),
+)
+# Sync primary pool from deployed URLs
+_all_urls = []
+for _h in _HANDLES:
+    _all_urls.extend(_h.urls or [])
+if not _all_urls:
+    for _m in _deploy_specs:
+        _all_urls.extend(list(_m.deployment.backend_urls or []))
+if _all_urls:
+    # dedupe preserve order
+    _seen = set()
+    _uniq = []
+    for u in _all_urls:
+        if u not in _seen:
+            _seen.add(u)
+            _uniq.append(u)
+    NIM_API_URL = _uniq[0]
+    CLUSTER.backend_pool = BackendPool(_uniq, strategy=MN_CFG.backend_strategy)
+    MN_CFG.backend_urls = list(CLUSTER.backend_pool.urls)
+# Keep SY_CFG models in sync with deploy-filled URLs
+if SY_CFG.models:
+    SY_CFG.models = list(_deploy_specs)
+print(
+    f"Model runtime: engine=nim stacks={len(_HANDLES)} "
+    f"models={[getattr(m, 'id', m) for m in _deploy_specs]} "
+    f"backends={CLUSTER.backend_pool.all()}"
 )
 SY_ROUTER = get_switchyard_router(
     SY_CFG,

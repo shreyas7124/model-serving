@@ -168,4 +168,11 @@ Session key: `X-Conversation-ID` header, or `user` / `conversation_id` body fiel
 - `shared.switchyard.get_switchyard_config()` — load env/file config  
 - `shared.switchyard.SwitchyardRouter` — route chat completions  
 - `shared.switchyard.EscalationRouter` — in-process escalation  
-- `shared.switchyard.export_routes_toml()` — TOML for official server  
+- `shared.switchyard.export_routes_toml()` — TOML for official server
+
+## Parallel auto-deploy
+
+When apps start with `AUTO_DEPLOY_MODEL=true`, every unique model in this config
+is deployed **in parallel** via `shared.deploy.ensure_models_runtime` (deduping
+shared backends such as weak+judge on the same URL). Non-IDE apps reuse the same
+JSON and expose a **model dropdown** instead of escalation routing.

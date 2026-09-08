@@ -91,6 +91,35 @@ GPU **working-set** KV stays inside vLLM (prefix cache). Optional **Mooncake** o
 stack is hierarchical overflow / cross-replica share — not a replacement for GPU KV.
 The IDE may still use Mooncake as an **app-level response** L2 cache for Moonshot/Kimi ids.
 
+
+## Multi-model parallel deploy
+
+All apps can run **several distinct models at once** (not only replicas of one model).
+
+### Config (shared Switchyard-style JSON)
+
+```bash
+export SWITCHYARD_CONFIG=./models.example.json   # or path to your models list
+# optional aliases also work: SWITCHYARD_MODELS='[{...},{...}]'
+```
+
+Each entry under `models[]` can set independent `deployment` knobs (`backend_urls`,
+`cuda_visible_devices`, `tensor_parallel_size`, `nim_image`, …). On startup,
+`ensure_models_runtime` deploys **unique stacks in parallel** and fills missing URLs.
+
+### Non-IDE apps (Streamlit + WebRTC)
+
+- Sidebar / header **dropdown** to pick the model for the conversation
+- Escalation routing is ignored; selection is explicit
+- Examples: `*-streamlit-chat/models.example.json`, `*-webrtc-voice/models.example.json`
+- WebRTC: `GET /api/models` + `model` field on socket events
+
+### IDE apps (Cline / Cursor)
+
+- Keep **NeMo Switchyard** routing (`switchyard/agent` + per-model ids on `/v1/models`)
+- Weak / strong / judge tiers are **auto-deployed in parallel** when backends are missing
+- See `shared/switchyard/README.md` and `*-ide-assistant/switchyard-models.example.json`
+
 ## NeMo Switchyard (IDE assistants)
 
 **nim-ide-assistant** and **hf-ide-assistant** support [NeMo Switchyard](https://github.com/NVIDIA-NeMo/Switchyard)-style multi-model routing:

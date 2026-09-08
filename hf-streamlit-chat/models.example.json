@@ -1,0 +1,40 @@
+{
+  "enabled": true,
+  "strategy": "passthrough",
+  "expose_models": true,
+  "allow_model_select": true,
+  "models": [
+    {
+      "name": "8b",
+      "id": "meta-llama/Llama-3.1-8B-Instruct",
+      "role": "general",
+      "max_tokens": 4096,
+      "temperature": 0.7,
+      "deployment": {
+        "backend_urls": [
+          "http://127.0.0.1:8000/v1/chat/completions"
+        ],
+        "cuda_visible_devices": "0",
+        "gpu_count": 1,
+        "deploy_mode": "replica",
+        "tensor_parallel_size": 1
+      }
+    },
+    {
+      "name": "70b",
+      "id": "meta-llama/Llama-3.1-70B-Instruct",
+      "role": "general",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "deployment": {
+        "backend_urls": [
+          "http://127.0.0.1:8001/v1/chat/completions"
+        ],
+        "cuda_visible_devices": "1,2,3,4",
+        "tensor_parallel_size": 4,
+        "gpu_count": 4,
+        "deploy_mode": "hybrid"
+      }
+    }
+  ]
+}

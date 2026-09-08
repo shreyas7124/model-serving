@@ -327,6 +327,12 @@ def ensure_model_runtime(
     deploy_mode: Optional[str] = None,
     replica_count: Optional[int] = None,
     tensor_parallel_size: Optional[int] = None,
+    pipeline_parallel_size: Optional[int] = None,
+    gpu_devices: Optional[Sequence[str]] = None,
+    gpu_per_replica: Optional[int] = None,
+    port_base: Optional[int] = None,
+    image: Optional[str] = None,
+    project: Optional[str] = None,
     existing_urls: Optional[Sequence[str]] = None,
     register_teardown: bool = True,
     api_key: str = "",
@@ -345,6 +351,12 @@ def ensure_model_runtime(
         deploy_mode=deploy_mode,
         replica_count=replica_count,
         tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        gpu_devices=list(gpu_devices) if gpu_devices is not None else None,
+        gpu_per_replica=gpu_per_replica,
+        port_base=port_base,
+        image=image,
+        project=project,
     )
     existing = _normalize_existing(existing_urls)
 
@@ -397,3 +409,225 @@ def ensure_model_runtime(
     if register_teardown and cfg.teardown_on_exit:
         register_runtime_teardown(handle)
     return handle
+
+
+def _model_spec_deploy_key(spec: Any) -> str:
+    """Dedupe key for multi-model deploy (shared backends deploy once)."""
+    dep = getattr(spec, "deployment", None)
+    if dep is None:
+        return f"id:{getattr(spec, 'id', '')}"
+    urls = tuple(sorted(u.rstrip("/") for u in (getattr(dep, "backend_urls", None) or []) if u))
+    if urls:
+        return "urls:" + ",".join(urls)
+    cvd = (getattr(dep, "cuda_visible_devices", "") or "").strip()
+    image = (getattr(dep, "nim_image", "") or "").strip()
+    extra = getattr(dep, "extra", None) or {}
+    if not image and isinstance(extra, dict):
+        image = str(extra.get("image", "") or "").strip()
+    tp = int(getattr(dep, "tensor_parallel_size", 1) or 1)
+    mode = (getattr(dep, "deploy_mode", "replica") or "replica").strip().lower()
+    mid = getattr(spec, "id", "") or ""
+    return f"id:{mid}|img:{image}|cvd:{cvd}|tp:{tp}|mode:{mode}"
+
+
+def _split_gpu_csv(raw: str) -> List[str]:
+    return [p.strip() for p in (raw or "").split(",") if p.strip()]
+
+
+def _gpus_needed(spec: Any) -> int:
+    dep = getattr(spec, "deployment", None)
+    if dep is None:
+        return 1
+    gc = int(getattr(dep, "gpu_count", 0) or 0)
+    tp = int(getattr(dep, "tensor_parallel_size", 1) or 1)
+    pp = int(getattr(dep, "pipeline_parallel_size", 1) or 1)
+    cvd = _split_gpu_csv(getattr(dep, "cuda_visible_devices", "") or "")
+    if cvd:
+        return len(cvd)
+    return max(gc, tp * pp, 1)
+
+
+def ensure_models_runtime(
+    engine: str,
+    models: Sequence[Any],
+    *,
+    app_name: str = "app",
+    api_key: str = "",
+    default_backend_urls: Optional[Sequence[str]] = None,
+    register_teardown: bool = True,
+    port_base: Optional[int] = None,
+) -> List[RuntimeHandle]:
+    """
+    Deploy multiple distinct models in parallel.
+
+    - Deduplicates by backend URLs / (model id + image + GPUs + TP).
+    - Writes resolved URLs back onto each ModelSpec.deployment.backend_urls.
+    - Packs free GPUs from GPU_DEVICES when cuda_visible_devices is empty.
+    - Assigns non-overlapping host ports (port_base + offset per unique stack).
+    """
+    specs = [m for m in (models or []) if m is not None]
+    if not specs:
+        raise RuntimeError("ensure_models_runtime: no models provided")
+
+    default_urls = _normalize_existing(default_backend_urls)
+
+    # Group specs that share a deploy key
+    groups: Dict[str, List[Any]] = {}
+    order: List[str] = []
+    for spec in specs:
+        # Seed empty backend from defaults only when single-model catalog
+        dep = spec.deployment
+        if (
+            not dep.backend_urls
+            and not dep.coordinator_url
+            and default_urls
+            and len(specs) == 1
+        ):
+            dep.backend_urls = list(default_urls)
+        key = _model_spec_deploy_key(spec)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(spec)
+
+    # Global GPU pool for packing when CVD not set
+    pool = _split_gpu_csv(os.getenv("GPU_DEVICES", os.getenv("CUDA_VISIBLE_DEVICES", "")))
+    used: set = set()
+
+    # Base port from engine defaults
+    if port_base is None:
+        if (engine or "").lower() == "nim":
+            base = int(os.getenv("NIM_PORT", "8000") or "8000")
+        else:
+            base = int(os.getenv("VLLM_PORT", "8000") or "8000")
+    else:
+        base = int(port_base)
+
+    # Pre-assign ports and GPUs for groups that need deploy
+    plan: List[Dict[str, Any]] = []
+    port_offset = 0
+    for key in order:
+        group = groups[key]
+        lead = group[0]
+        dep = lead.deployment
+        existing = _normalize_existing(list(dep.backend_urls or []))
+        if dep.coordinator_url:
+            existing = _normalize_existing([dep.coordinator_url]) + existing
+
+        gpus = _split_gpu_csv(getattr(dep, "cuda_visible_devices", "") or "")
+        need = _gpus_needed(lead)
+        if not gpus and pool:
+            free = [g for g in pool if g not in used]
+            if len(free) < need:
+                raise RuntimeError(
+                    f"Not enough GPU_DEVICES for model {getattr(lead, 'id', key)}: "
+                    f"need {need}, free {len(free)} (pool={pool})"
+                )
+            gpus = free[:need]
+            used.update(gpus)
+        elif gpus:
+            used.update(gpus)
+
+        tp = int(getattr(dep, "tensor_parallel_size", 1) or 1)
+        pp = int(getattr(dep, "pipeline_parallel_size", 1) or 1)
+        mode = (getattr(dep, "deploy_mode", "") or None) or None
+        image = (getattr(dep, "nim_image", "") or "").strip()
+        extra = getattr(dep, "extra", None) or {}
+        if not image and isinstance(extra, dict):
+            image = str(extra.get("image", "") or "").strip()
+        gpr = int(getattr(dep, "gpu_count", 0) or 0) or max(tp * pp, len(gpus) or 1)
+
+        slug_id = re_slug(getattr(lead, "name", None) or getattr(lead, "id", "model"))
+        model_port = base + port_offset
+        # Reserve ports for potential multi-replica of this stack
+        replicas = 1
+        try:
+            replicas = max(1, int(os.getenv("VLLM_REPLICA_COUNT", os.getenv("NIM_REPLICA_COUNT", "1")) or "1"))
+        except ValueError:
+            replicas = 1
+        if mode == "sharded":
+            replicas = 1
+        port_offset += max(replicas, 1)
+
+        plan.append(
+            {
+                "key": key,
+                "group": group,
+                "lead": lead,
+                "existing": existing,
+                "gpus": gpus,
+                "tp": tp,
+                "pp": pp,
+                "mode": mode,
+                "image": image or None,
+                "gpr": gpr,
+                "port": model_port,
+                "project_suffix": slug_id,
+                "model_id": getattr(lead, "id", "") or "",
+            }
+        )
+
+    def _one(entry: Dict[str, Any]) -> RuntimeHandle:
+        handle = ensure_model_runtime(
+            engine,
+            app_name=f"{app_name}-{entry['project_suffix']}",
+            model_id=entry["model_id"],
+            deploy_mode=entry["mode"],
+            replica_count=1 if entry["mode"] == "sharded" else None,
+            tensor_parallel_size=entry["tp"],
+            pipeline_parallel_size=entry["pp"],
+            gpu_devices=entry["gpus"] or None,
+            gpu_per_replica=entry["gpr"],
+            port_base=entry["port"],
+            image=entry["image"],
+            project=f"ms-{engine}-{app_name}-{entry['project_suffix']}",
+            existing_urls=entry["existing"] or None,
+            register_teardown=register_teardown,
+            api_key=api_key,
+        )
+        # Write URLs back to all specs in the group
+        urls = list(handle.urls or entry["existing"] or [])
+        for spec in entry["group"]:
+            if urls:
+                spec.deployment.backend_urls = list(urls)
+            if entry["gpus"] and not (spec.deployment.cuda_visible_devices or "").strip():
+                spec.deployment.cuda_visible_devices = ",".join(entry["gpus"])
+        return handle
+
+    handles: List[RuntimeHandle] = []
+    if len(plan) == 1:
+        handles.append(_one(plan[0]))
+        return handles
+
+    # Parallel deploy distinct stacks
+    errors: List[BaseException] = []
+    with ThreadPoolExecutor(max_workers=max(1, len(plan))) as pool_ex:
+        futs = {pool_ex.submit(_one, entry): entry for entry in plan}
+        for fut in as_completed(futs):
+            entry = futs[fut]
+            try:
+                handles.append(fut.result())
+            except BaseException as exc:
+                logger.exception(
+                    "Multi-model deploy failed for %s: %s",
+                    entry.get("model_id"), 
+                    exc,
+                )
+                errors.append(exc)
+    if errors and not handles:
+        raise errors[0]
+    if errors:
+        logger.warning(
+            "Some model stacks failed to deploy (%d ok, %d failed)",
+            len(handles),
+            len(errors),
+        )
+    return handles
+
+
+def re_slug(s: str) -> str:
+    import re as _re
+
+    s = _re.sub(r"[^a-zA-Z0-9_.-]+", "-", (s or "model").strip().lower())
+    return (s.strip("-") or "model")[:48]
+

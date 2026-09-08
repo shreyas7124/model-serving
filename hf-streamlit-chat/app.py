@@ -1,6 +1,7 @@
 """
 HuggingFace Model with Streamlit Chat Interface (vLLM backend)
-Supports optional login and chat history. Inference via OpenAI-compatible vLLM.
+Supports optional login, chat history, and multi-model dropdown.
+Inference via OpenAI-compatible vLLM (one or more models in parallel).
 """
 import streamlit as st
 import sys
@@ -10,10 +11,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.auth import AuthManager
 from shared.database import ChatHistory
-from shared.backends import OpenAIChatClient, require_backend_urls
-from shared.deploy import ensure_model_runtime
+from shared.backends import require_backend_urls
 from shared.multinode import BackendPool, ClusterInfo, get_multinode_config
 from shared.tools import get_web_access_tool
+from shared.model_catalog import deploy_app_models, load_app_models
 
 os.environ.setdefault("LOAD_MODEL_WEIGHTS", "false")
 
@@ -21,7 +22,7 @@ MN_CFG = get_multinode_config(default_port=8501, app_name="hf-streamlit-chat")
 CLUSTER = ClusterInfo(MN_CFG, app_name="hf-streamlit-chat")
 WEB = get_web_access_tool("hf-streamlit-chat")
 
-MODEL_NAME = os.getenv(
+DEFAULT_MODEL_NAME = os.getenv(
     "HF_MODEL_NAME", os.getenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 )
 DEFAULT_TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
@@ -29,29 +30,29 @@ DEFAULT_MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 REQUEST_TIMEOUT = float(os.getenv("VLLM_TIMEOUT", "300"))
 
-_RUNTIME = ensure_model_runtime(
-    "vllm",
-    app_name="hf-streamlit-chat",
-    model_id=MODEL_NAME,
-    deploy_mode=MN_CFG.model_deploy_mode,
-    replica_count=int(os.getenv("VLLM_REPLICA_COUNT", "1") or "1"),
-    tensor_parallel_size=MN_CFG.tensor_parallel_size,
-    existing_urls=MN_CFG.backend_urls or CLUSTER.backend_pool.urls,
-    api_key=VLLM_API_KEY,
+default_backend = (MN_CFG.backend_urls[0] if MN_CFG.backend_urls else "")
+SY_CFG = load_app_models(
+    default_model_id=DEFAULT_MODEL_NAME,
+    default_backend_url=default_backend,
+    owned_by="hf-streamlit-chat",
+    reload=True,
 )
-backends = require_backend_urls(_RUNTIME.urls or MN_CFG.backend_urls or CLUSTER.backend_pool.urls)
+CATALOG, _HANDLES = deploy_app_models(
+    "vllm",
+    SY_CFG,
+    app_name="hf-streamlit-chat",
+    api_key=VLLM_API_KEY,
+    default_backend_urls=MN_CFG.backend_urls or CLUSTER.backend_pool.urls,
+)
+backends = require_backend_urls(
+    CATALOG.all_backend_urls() or MN_CFG.backend_urls or CLUSTER.backend_pool.urls
+)
 CLUSTER.backend_pool = BackendPool(backends, strategy=MN_CFG.backend_strategy)
 MN_CFG.backend_urls = backends
-
-VLLM_CLIENT = OpenAIChatClient(
-    next_url=CLUSTER.next_backend,
-    model=MODEL_NAME,
-    api_key=VLLM_API_KEY,
-    timeout=REQUEST_TIMEOUT,
-    mark_success=CLUSTER.backend_pool.mark_success,
-    mark_failure=CLUSTER.backend_pool.mark_failure,
-    default_temperature=DEFAULT_TEMPERATURE,
-    default_max_tokens=DEFAULT_MAX_TOKENS,
+MODEL_NAME = CATALOG.default_id()
+print(
+    f"Models: {[m.id for m in CATALOG.models]} multi={CATALOG.multi} "
+    f"backends={backends}"
 )
 
 auth_manager = AuthManager()
@@ -71,6 +72,8 @@ def init_session_state():
         st.session_state.messages = []
     if "session_token" not in st.session_state:
         st.session_state.session_token = None
+    if "selected_model" not in st.session_state:
+        st.session_state.selected_model = CATALOG.default_id()
 
 
 def login_page():
@@ -101,79 +104,76 @@ def login_page():
         )
         if st.button("Register"):
             if new_password != confirm_password:
-                st.error("Passwords don't match")
+                st.error("Passwords do not match")
             elif len(new_password) < 6:
                 st.error("Password must be at least 6 characters")
+            elif auth_manager.register_user(new_username, new_password):
+                st.success("Registration successful! Please login.")
             else:
-                if auth_manager.register_user(new_username, new_password):
-                    st.success("Registration successful! Please login.")
-                else:
-                    st.error("Username already exists")
+                st.error("Username already exists")
 
     with tab3:
         st.subheader("Continue as Guest")
-        st.info("You can use the chat without logging in, but your history won't be saved.")
+        st.info("Your chat history will not be saved")
         if st.button("Continue as Guest"):
             st.session_state.authenticated = True
-            st.session_state.user_id = None
             st.session_state.username = "Guest"
             st.rerun()
 
 
-def generate_response(user_prompt: str, history_messages, web_context: str = "") -> str:
-    messages = []
-    for msg in history_messages:
+def generate_response(prompt, messages, web_context: str = "", model_id: str = ""):
+    model_messages = []
+    for msg in messages or []:
         role = msg.get("role")
         content = msg.get("content", "")
         if role in ("user", "assistant", "system") and content:
-            messages.append({"role": role, "content": content})
-    # current user turn already appended by caller; ensure last is user
-    if not messages or messages[-1].get("content") != user_prompt:
-        model_prompt = user_prompt
-        if web_context:
-            model_prompt = (
-                f"{web_context}\n\n"
-                f"User question (may reference the URL(s) above):\n{user_prompt}"
-            )
-        messages.append({"role": "user", "content": model_prompt})
-    elif web_context and messages[-1].get("role") == "user":
-        messages[-1] = {
-            "role": "user",
-            "content": (
-                f"{web_context}\n\n"
-                f"User question (may reference the URL(s) above):\n{user_prompt}"
-            ),
-        }
+            model_messages.append({"role": role, "content": content})
+    if model_messages and model_messages[-1].get("role") == "user":
+        model_messages = model_messages[:-1]
+    user_content = prompt
+    if web_context:
+        user_content = (
+            f"{web_context}\n\n"
+            f"User question (may reference the URL(s) above):\n{prompt}"
+        )
+    model_messages.append({"role": "user", "content": user_content})
     try:
-        _data, text = VLLM_CLIENT.chat(messages)
+        text, _data = CATALOG.chat(
+            model_messages,
+            model=model_id or st.session_state.get("selected_model"),
+            temperature=DEFAULT_TEMPERATURE,
+            max_tokens=DEFAULT_MAX_TOKENS,
+        )
         return text or "(empty response)"
     except Exception as e:
-        return f"Error generating response: {e}"
+        return f"Error: {e}"
 
 
 def chat_page():
-    st.title("HuggingFace Chat Interface (vLLM)")
+    st.title("HuggingFace Chat Interface")
 
     with st.sidebar:
-        st.write(f"User: {st.session_state.username}")
-        st.write(f"Model: {MODEL_NAME}")
-        st.write("Backend: vLLM")
-        with st.expander("Cluster / node"):
-            node = CLUSTER.health(inference_backend="vllm", model=MODEL_NAME)
-            st.caption(f"node: `{node['node']['node_id']}`")
-            st.caption(f"multi_node: `{node['node']['multi_node']}`")
-            st.caption(f"backends: `{node.get('backends', {})}`")
-        with st.expander("Web access"):
-            ws = WEB.stats()
-            st.caption(f"enabled: `{ws['enabled']}`")
-            st.caption(f"fetches: `{ws['fetches']}` failures: `{ws['failures']}`")
-            st.caption(f"log: `{ws['log_file']}`")
-            st.caption("URLs in messages are fetched; full page text is logged.")
+        st.write(f"Logged in as: **{st.session_state.username}**")
+        labels, label_to_id = CATALOG.streamlit_options()
+        current = st.session_state.get("selected_model") or CATALOG.default_id()
+        # Map current id to label
+        id_to_label = {v: k for k, v in label_to_id.items()}
+        default_label = id_to_label.get(current, labels[0] if labels else current)
+        try:
+            idx = labels.index(default_label)
+        except ValueError:
+            idx = 0
+        chosen = st.selectbox("Model", labels, index=idx, key="model_selectbox")
+        st.session_state.selected_model = label_to_id.get(chosen, CATALOG.default_id())
+        st.caption(f"Active: `{st.session_state.selected_model}`")
+        if CATALOG.multi:
+            st.caption(f"{len(CATALOG.choices_for_ui())} models deployed in parallel")
 
         if st.button("Logout"):
             if st.session_state.session_token:
                 auth_manager.logout(st.session_state.session_token)
-            st.session_state.clear()
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
 
         st.divider()
@@ -238,10 +238,12 @@ def chat_page():
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                # history without the just-added user msg for builder; generate_response merges
                 prior = st.session_state.messages[:-1]
                 response = generate_response(
-                    prompt, prior + [{"role": "user", "content": prompt}], web_context=web_context
+                    prompt,
+                    prior + [{"role": "user", "content": prompt}],
+                    web_context=web_context,
+                    model_id=st.session_state.selected_model,
                 )
                 st.markdown(response)
 
