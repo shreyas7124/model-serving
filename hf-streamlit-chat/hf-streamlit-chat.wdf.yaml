@@ -12,8 +12,9 @@
 #    via BACKEND_URLS. The common model across all model-serving apps is
 #    meta-llama/Llama-3.1-8B-Instruct (vLLM id) = meta/llama-3.1-8b-instruct (NIM).
 #  - The gcp-gpu-vm scenario targets the pre-provisioned GCP GPU VM TDF
-#    `model-serving-gpu-vm-gcp-us-central` (see 7sg-ai/default repo). Deploy
-#    agents resolve provider=gcp + region=us-central1 to that TDF.
+#    `model-serving-gpu-vm-gcp-us-central` (see 7sg-ai/default repo) via
+#    deployments[].target.tdfRef. Sherpa does not infer the TDF from
+#    provider+region alone.
 apiVersion: wdf.7sg.ai/v2
 kind: WorkloadDefinition
 metadata:
@@ -163,6 +164,7 @@ scenarios:
         provider: gcp
         region: us-central1
         namespace: model-serving
+        tdfRef: model-serving-gpu-vm-gcp-us-central
         cloudCredentialRef: gcp
       components:
       - chat-ui
