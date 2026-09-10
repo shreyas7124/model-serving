@@ -11,15 +11,14 @@
 #    server is a SEPARATE component (vllm-server) that the chat-ui proxies to
 #    via BACKEND_URLS. The common model across all model-serving apps is
 #    meta-llama/Llama-3.1-8B-Instruct (vLLM id) = meta/llama-3.1-8b-instruct (NIM).
-#  - The gcp-gpu-vm scenario targets the pre-provisioned GCP GPU VM TDF
-#    `model-serving-gpu-vm-gcp-us-central` (see 7sg-ai/default repo) via
-#    deployments[].target.tdfRef. Sherpa does not infer the TDF from
-#    provider+region alone.
+#  - The gcp-gpu-vm scenario is an alternate (v2 schema allows only
+#    scenarios.native + scenarios.alternates[]). It targets TDF
+#    `model-serving-gpu-vm-gcp-us-central` via deployments[].target.tdfRef.
 apiVersion: wdf.7sg.ai/v2
 kind: WorkloadDefinition
 metadata:
   name: hf-streamlit-chat
-  version: 1.1.0
+  version: 1.1.1
   description: HuggingFace Streamlit chat UI. OpenAI-compatible client to vLLM (no in-process Transformers).
   tags:
     env: dev
@@ -82,12 +81,11 @@ scenarios:
         namespace: model-serving
       components:
       - chat-ui
-  # Primary scenario for profiling/testing on the pre-provisioned GCP GPU VM.
+  alternates:
   # Two components share one host: the CPU-light Streamlit UI and the GPU
-  # vLLM model server. deploy_build_planner generates Dockerfiles for both
-  # (none exist in the repo); deploy_app_deployer runs `docker compose up -d`
-  # over SSH after immutable approval.
-  gcp-gpu-vm:
+  # vLLM model server. deploy_app_deployer is expected to run
+  # `docker compose up -d` over SSH after immutable approval.
+  - name: gcp-gpu-vm
     description: Pre-provisioned GCP GPU VM (Docker + NVIDIA Container Toolkit) in us-central1.
     topology:
       components:
@@ -123,7 +121,7 @@ scenarios:
           protocol: http
           path: /
       - name: vllm-server
-        role: model-server
+        role: custom
         runtime:
           platform: vm
           regions:
@@ -169,7 +167,6 @@ scenarios:
       components:
       - chat-ui
       - vllm-server
-  alternates:
   - name: azure-kubernetes
     description: Scale-out on an AKS GPU node pool.
     topology:
