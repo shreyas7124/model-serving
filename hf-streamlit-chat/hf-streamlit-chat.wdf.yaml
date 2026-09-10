@@ -1,19 +1,24 @@
-# Workload Definition File (WDF) — generated for hf-streamlit-chat
+# Workload Definition File (WDF) — corrected for hf-streamlit-chat
 # apiVersion wdf.7sg.ai/v2 (scenario-based). Validated against
 # services/artifacts/schema/wdf.schema.202605011755.json.
 #
 # NOTES / placeholders to review before use:
-#  - This app has no Dockerfile; the platform build step must produce the image
-#    (runtime.image.repository below is a suggested name; registry is left to the build/push).
+#  - This app has no Dockerfile; the platform build step (deploy_build_planner)
+#    will GENERATE one (slim Python + pip + `streamlit run app.py`, non-root).
 #  - autoscaling is pinned to 1 replica: all apps share a local SQLite store
 #    (shared/database/*.db), which is not safe to run multi-replica as-is.
-#  - secret externalRef.key values are placeholder Vault paths — set real ones.
-#  - Proxies to vLLM: schedule on a CUDA GPU node; memory sized for a small model.
+#  - HF apps are vLLM-only clients (no in-process Transformers). The model
+#    server is a SEPARATE component (vllm-server) that the chat-ui proxies to
+#    via BACKEND_URLS. The common model across all model-serving apps is
+#    meta-llama/Llama-3.1-8B-Instruct (vLLM id) = meta/llama-3.1-8b-instruct (NIM).
+#  - The gcp-gpu-vm scenario targets the pre-provisioned GCP GPU VM TDF
+#    `model-serving-gpu-vm-gcp-us-central` (see 7sg-ai/default repo). Deploy
+#    agents resolve provider=gcp + region=us-central1 to that TDF.
 apiVersion: wdf.7sg.ai/v2
 kind: WorkloadDefinition
 metadata:
   name: hf-streamlit-chat
-  version: 1.0.0
+  version: 1.1.0
   description: HuggingFace Streamlit chat UI. OpenAI-compatible client to vLLM (no in-process Transformers).
   tags:
     env: dev
@@ -26,7 +31,16 @@ security:
     secretsInEnvAllowed: true
 secrets:
   provider: external-secrets
-  secretRefs: []
+  secretRefs:
+    # Needed to pull gated Llama-3.1 weights from HuggingFace into the vLLM
+    # container. Injected into the vllm-server component only.
+    - name: hf-hub-token
+      injectAs: env
+      envVar: HUGGING_FACE_HUB_TOKEN
+      source_type: external_vault
+      externalRef:
+        provider: vault
+        key: secret/model-serving/hf-hub-token
 scenarios:
   native:
     description: Local single-node container host (matches the repo's local-first setup).
@@ -52,7 +66,7 @@ scenarios:
               target: 70
           env:
           - name: HF_MODEL_NAME
-            value: microsoft/DialoGPT-medium
+            value: meta-llama/Llama-3.1-8B-Instruct
         endpoints:
         - name: http
           port: 8501
@@ -67,6 +81,92 @@ scenarios:
         namespace: model-serving
       components:
       - chat-ui
+  # Primary scenario for profiling/testing on the pre-provisioned GCP GPU VM.
+  # Two components share one host: the CPU-light Streamlit UI and the GPU
+  # vLLM model server. deploy_build_planner generates Dockerfiles for both
+  # (none exist in the repo); deploy_app_deployer runs `docker compose up -d`
+  # over SSH after immutable approval.
+  gcp-gpu-vm:
+    description: Pre-provisioned GCP GPU VM (Docker + NVIDIA Container Toolkit) in us-central1.
+    topology:
+      components:
+      - name: chat-ui
+        role: ui
+        runtime:
+          platform: vm
+          regions:
+          - us-central1
+          image:
+            repository: model-serving/hf-streamlit-chat
+            tag: latest
+          resources:
+            cpu: '2'
+            memory: 4Gi
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: HF_MODEL_NAME
+            value: meta-llama/Llama-3.1-8B-Instruct
+          - name: BACKEND_URLS
+            value: http://vllm-server:8000/v1/chat/completions
+          - name: BACKEND_STRATEGY
+            value: round_robin
+        endpoints:
+        - name: http
+          port: 8501
+          exposure: public
+          protocol: http
+          path: /
+      - name: vllm-server
+        role: model-server
+        runtime:
+          platform: vm
+          regions:
+          - us-central1
+          image:
+            repository: vllm/vllm-openai
+            tag: latest
+          resources:
+            cpu: '4'
+            memory: 16Gi
+            gpu:
+              count: 1
+              type: nvidia-l4
+          autoscaling:
+            minReplicas: 1
+            maxReplicas: 1
+            policy:
+              metric: cpu
+              target: 70
+          env:
+          - name: VLLM_MODEL
+            value: meta-llama/Llama-3.1-8B-Instruct
+          - name: TENSOR_PARALLEL_SIZE
+            value: '1'
+          - name: VLLM_MAX_MODEL_LEN
+            value: '8192'
+          envFromSecretRefs:
+          - hf-hub-token
+        endpoints:
+        - name: http
+          port: 8000
+          exposure: internal
+          protocol: http
+          path: /v1
+    deployments:
+    - name: gcp-us-central
+      target:
+        provider: gcp
+        region: us-central1
+        namespace: model-serving
+        cloudCredentialRef: gcp
+      components:
+      - chat-ui
+      - vllm-server
   alternates:
   - name: azure-kubernetes
     description: Scale-out on an AKS GPU node pool.
@@ -92,7 +192,7 @@ scenarios:
               target: 70
           env:
           - name: HF_MODEL_NAME
-            value: microsoft/DialoGPT-medium
+            value: meta-llama/Llama-3.1-8B-Instruct
         endpoints:
         - name: http
           port: 8501
