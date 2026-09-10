@@ -132,10 +132,10 @@ scenarios:
             tag: latest
           resources:
             cpu: '4'
-            memory: 16Gi
+            memory: 32Gi
             gpu:
               count: 1
-              type: nvidia-l4
+              type: nvidia-a100-40gb
           autoscaling:
             minReplicas: 1
             maxReplicas: 1
